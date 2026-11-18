@@ -1,0 +1,15 @@
+# Dependencies & Build Artifacts
+node_modules/
+dist/
+.pnpm-store/
+
+# Rust / Tauri Build Outputs
+src-tauri/target/
+src-tauri/gen/
+
+# OS & Logs
+.DS_Store
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.env.local

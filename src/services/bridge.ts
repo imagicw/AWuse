@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   DiagnosticSummary,
+  LibraryRoot,
   OnlineSearchResult,
   ReorganizePreviewItem,
   ReorganizeRule,
@@ -21,8 +22,71 @@ import {
 } from "./cjkAndBatchEngine";
 import { getCuratedOnlineMatches } from "./sampleLibrary";
 
+const BROWSER_ROOTS_STORAGE_KEY = "awusic-library-roots-v1";
+const BROWSER_TRACKS_STORAGE_KEY = "awusic-browser-tracks-v1";
+
 export function isTauriEnvironment(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function hydrateTauriTrackMedia(track: TrackRecord): TrackRecord {
+  if (!isTauriEnvironment()) return track;
+  let coverDataUrl = track.coverDataUrl;
+  if (
+    coverDataUrl &&
+    !coverDataUrl.startsWith("data:") &&
+    !coverDataUrl.startsWith("http") &&
+    !coverDataUrl.startsWith("asset:") &&
+    !coverDataUrl.startsWith("blob:")
+  ) {
+    coverDataUrl = convertFileSrc(coverDataUrl);
+  }
+  const objectUrl =
+    track.objectUrl ||
+    (track.filePath && (track.filePath.startsWith("/") || /^[a-zA-Z]:/.test(track.filePath))
+      ? convertFileSrc(track.filePath)
+      : undefined);
+  return {
+    ...track,
+    coverDataUrl,
+    objectUrl,
+  };
+}
+
+export function loadBrowserRoots(): LibraryRoot[] {
+  try {
+    const raw = localStorage.getItem(BROWSER_ROOTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveBrowserRoots(roots: LibraryRoot[]): void {
+  try {
+    localStorage.setItem(BROWSER_ROOTS_STORAGE_KEY, JSON.stringify(roots));
+  } catch {}
+}
+
+export function loadBrowserTracks(): TrackRecord[] {
+  try {
+    const raw = localStorage.getItem(BROWSER_TRACKS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveBrowserTracks(tracks: TrackRecord[]): void {
+  try {
+    // Strip transient blob objectUrls before saving
+    const serializable = tracks.map(({ objectUrl: _omit, ...rest }) => rest);
+    localStorage.setItem(BROWSER_TRACKS_STORAGE_KEY, JSON.stringify(serializable));
+  } catch {}
 }
 
 export function applyPatchToTrack(track: TrackRecord, patch: TagPatch): TrackRecord {
@@ -54,8 +118,12 @@ export function applyPatchToTrack(track: TrackRecord, patch: TagPatch): TrackRec
         : track.coverHash,
     filePath: patch.newFilePath ?? track.filePath,
     fileName: patch.newFilePath
-      ? patch.newFilePath.split("/").pop() || track.fileName
+      ? patch.newFilePath.split(/[/\\]/).pop() || track.fileName
       : track.fileName,
+    objectUrl:
+      patch.newFilePath && isTauriEnvironment()
+        ? convertFileSrc(patch.newFilePath)
+        : track.objectUrl,
   };
 
   next.pinyinInitial = computePinyinInitial(next.albumArtist || next.artist || next.title);
@@ -86,14 +154,94 @@ export function computeDiagnosticsFromTracks(tracks: TrackRecord[]): DiagnosticS
   return summary;
 }
 
+export async function bridgeQueryTracks(
+  workspaceMode: WorkspaceMode
+): Promise<TrackRecord[]> {
+  if (isTauriEnvironment()) {
+    const res = await invoke<TrackRecord[]>("query_tracks", {
+      workspaceMode,
+      searchQuery: null,
+    });
+    return res.map(hydrateTauriTrackMedia);
+  }
+  return loadBrowserTracks().filter((t) => t.workspaceMode === workspaceMode);
+}
+
+export async function bridgeListLibraryRoots(): Promise<LibraryRoot[]> {
+  if (isTauriEnvironment()) {
+    return invoke<LibraryRoot[]>("list_library_roots");
+  }
+  return loadBrowserRoots();
+}
+
+export async function bridgePickDirectory(): Promise<string | null> {
+  if (isTauriEnvironment()) {
+    return invoke<string | null>("pick_directory_dialog");
+  }
+  return null;
+}
+
 export async function bridgeScanDirectory(
   dirPath: string,
   workspaceMode: WorkspaceMode
 ): Promise<TrackRecord[] | null> {
   if (isTauriEnvironment()) {
-    return invoke<TrackRecord[]>("scan_directory", { dirPath, workspaceMode });
+    const res = await invoke<TrackRecord[]>("scan_directory", {
+      dirPath,
+      workspaceMode,
+    });
+    return res.map(hydrateTauriTrackMedia);
   }
+
+  const normalized = dirPath.trim().replace(/[/\\]+$/, "") || "/";
+  const label = normalized.split(/[/\\]/).filter(Boolean).pop() || normalized;
+  const now = new Date().toISOString();
+  const roots = loadBrowserRoots();
+  const existingIdx = roots.findIndex((r) => r.path === normalized);
+  if (existingIdx >= 0) {
+    roots[existingIdx] = { ...roots[existingIdx], label, lastScan: now };
+  } else {
+    roots.push({
+      id: Date.now(),
+      path: normalized,
+      label,
+      addedAt: now,
+      lastScan: now,
+      trackCount: 0,
+    });
+  }
+  saveBrowserRoots(roots);
   return null;
+}
+
+export async function bridgeRemoveLibraryRoot(dirPath: string): Promise<void> {
+  if (isTauriEnvironment()) {
+    await invoke<void>("remove_library_root", { dirPath });
+    return;
+  }
+  const norm = dirPath.trim().replace(/[/\\]+$/, "") || "/";
+  const prefix = norm === "/" ? "/" : `${norm}/`;
+  const roots = loadBrowserRoots().filter((r) => r.path !== norm && r.path !== dirPath);
+  saveBrowserRoots(roots);
+  const remaining = loadBrowserTracks().filter(
+    (t) => !t.filePath.startsWith(prefix) && t.filePath !== norm
+  );
+  saveBrowserTracks(remaining);
+}
+
+export async function bridgeDeleteTracks(
+  trackIds: string[],
+  deleteFromDisk: boolean
+): Promise<number> {
+  if (trackIds.length === 0) return 0;
+  if (isTauriEnvironment()) {
+    return invoke<number>("delete_tracks_cmd", { trackIds, deleteFromDisk });
+  }
+  const idSet = new Set(trackIds);
+  const current = loadBrowserTracks();
+  const next = current.filter((t) => !idSet.has(t.id));
+  saveBrowserTracks(next);
+  return current.length - next.length;
 }
 
 export async function bridgeCommitChanges(

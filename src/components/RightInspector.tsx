@@ -1,7 +1,13 @@
 import React, { useRef, useState } from "react";
 import { StagedChange, TagPatch, TrackRecord } from "../types/music";
 import { toPinyinSortKey } from "../services/cjkAndBatchEngine";
-import { IconDisc, IconGlobe, IconShieldCheck, IconUpload } from "./Icons";
+import {
+  IconDisc,
+  IconGlobe,
+  IconShieldCheck,
+  IconTrash,
+  IconUpload,
+} from "./Icons";
 
 interface RightInspectorProps {
   selectedTracks: TrackRecord[];
@@ -9,6 +15,7 @@ interface RightInspectorProps {
   onStageBatchPatch: (trackIds: string[], patch: TagPatch, reason: string) => void;
   onVerifyTrackMd5: (track: TrackRecord) => void;
   onOpenScraper: () => void;
+  onRequestDeleteTracks: (trackIds: string[]) => void;
 }
 
 const MIXED_SENTINEL = "\u0000__MIXED__";
@@ -75,6 +82,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   onStageBatchPatch,
   onVerifyTrackMd5,
   onOpenScraper,
+  onRequestDeleteTracks,
 }) => {
   const coverInputRef = useRef<HTMLInputElement>(null);
   const [verifying, setVerifying] = useState(false);
@@ -480,6 +488,22 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             </dl>
           </>
         )}
+
+        <hr className="inspector-section-divider" />
+
+        <button
+          type="button"
+          className="tool-btn danger-btn"
+          style={{ width: "100%", justifyContent: "center" }}
+          onClick={() => onRequestDeleteTracks(ids)}
+        >
+          <IconTrash size={14} />
+          <span>
+            {selectedTracks.length === 1
+              ? "删除此曲目"
+              : `批量删除所选 ${selectedTracks.length} 首曲目`}
+          </span>
+        </button>
       </div>
     </aside>
   );

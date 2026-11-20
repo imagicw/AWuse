@@ -1,9 +1,11 @@
 import React, { useState, useRef } from "react";
 import { StagedChange, TagPatch, TrackRecord } from "../types/music";
-import { IconPlay } from "./Icons";
+import { IconDisc, IconPlay, IconTrash } from "./Icons";
+import { VinylEmptyState } from "./VinylEmptyState";
 
 interface ProSpreadsheetViewProps {
   tracks: TrackRecord[];
+  hasAnyTracks: boolean;
   selectedIds: Set<string>;
   stagedMap: Map<string, StagedChange>;
   playingTrackId: string | null;
@@ -11,6 +13,10 @@ interface ProSpreadsheetViewProps {
   onSelectAll: (ids: string[]) => void;
   onStageFieldEdit: (trackId: string, patch: TagPatch, reason: string) => void;
   onPlayTrack: (track: TrackRecord) => void;
+  onRequestDeleteTracks: (trackIds: string[]) => void;
+  onAddDirectory: () => void;
+  onTriggerFileImport: () => void;
+  onClearFilters: () => void;
 }
 
 type EditableField =
@@ -36,6 +42,7 @@ function formatRate(sr: number, bd: number): string {
 
 export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
   tracks,
+  hasAnyTracks,
   selectedIds,
   stagedMap,
   playingTrackId,
@@ -43,6 +50,10 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
   onSelectAll,
   onStageFieldEdit,
   onPlayTrack,
+  onRequestDeleteTracks,
+  onAddDirectory,
+  onTriggerFileImport,
+  onClearFilters,
 }) => {
   const [editingCell, setEditingCell] = useState<{
     trackId: string;
@@ -88,6 +99,12 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
       return;
     }
 
+    if ((e.key === "Delete" || e.key === "Backspace") && selectedIds.size > 0) {
+      e.preventDefault();
+      onRequestDeleteTracks(Array.from(selectedIds));
+      return;
+    }
+
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       const firstSelected = tracks.findIndex((t) => selectedIds.has(t.id));
@@ -114,7 +131,8 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
     field: EditableField,
     displayVal: string,
     isStaged: boolean,
-    extraClass = ""
+    extraClass = "",
+    thumbUrl?: string | null
   ) => {
     const isEditing = editingCell?.trackId === t.id && editingCell?.field === field;
     if (isEditing) {
@@ -162,10 +180,36 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
         }}
         title={`${displayVal || "（空）"} — 双击行内编辑`}
       >
-        {displayVal || <span style={{ color: "var(--text-tertiary)" }}>—</span>}
+        {field === "title" ? (
+          <div className="track-title-cell">
+            <div className="track-row-thumb" aria-hidden="true">
+              {thumbUrl ? (
+                <img src={thumbUrl} alt="" loading="lazy" width={34} height={34} />
+              ) : (
+                <IconDisc size={15} />
+              )}
+            </div>
+            <span className="track-row-text">
+              {displayVal || <span style={{ color: "var(--text-tertiary)" }}>—</span>}
+            </span>
+          </div>
+        ) : (
+          displayVal || <span style={{ color: "var(--text-tertiary)" }}>—</span>
+        )}
       </td>
     );
   };
+
+  if (tracks.length === 0) {
+    return (
+      <VinylEmptyState
+        hasAnyTracks={hasAnyTracks}
+        onAddDirectory={onAddDirectory}
+        onTriggerFileImport={onTriggerFileImport}
+        onClearFilters={onClearFilters}
+      />
+    );
+  }
 
   const allSelected =
     tracks.length > 0 && tracks.every((t) => selectedIds.has(t.id));
@@ -185,7 +229,7 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
         </caption>
         <thead>
           <tr>
-            <th scope="col" style={{ width: "36px", textAlign: "center" }}>
+            <th scope="col" style={{ width: "42px", textAlign: "center" }}>
               <input
                 type="checkbox"
                 aria-label="全选当前列表音轨"
@@ -195,184 +239,174 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
                 }
               />
             </th>
-            <th scope="col" style={{ width: "44px" }}>
+            <th scope="col" style={{ width: "48px" }}>
               #
             </th>
-            <th scope="col" style={{ width: "22%" }}>
+            <th scope="col" style={{ width: "24%" }}>
               曲目标题
             </th>
-            <th scope="col" style={{ width: "16%" }}>
-              歌手 (Artist)
-            </th>
             <th scope="col" style={{ width: "15%" }}>
-              专辑歌手 (Album Artist)
+              歌手
             </th>
-            <th scope="col" style={{ width: "18%" }}>
-              专辑 (Album)
+            <th scope="col" style={{ width: "14%" }}>
+              专辑歌手
             </th>
-            <th scope="col" style={{ width: "64px" }}>
+            <th scope="col" style={{ width: "17%" }}>
+              专辑
+            </th>
+            <th scope="col" style={{ width: "68px" }}>
               年份
             </th>
-            <th scope="col" style={{ width: "100px" }}>
+            <th scope="col" style={{ width: "96px" }}>
               流派
             </th>
-            <th scope="col" style={{ width: "112px" }}>
+            <th scope="col" style={{ width: "118px" }}>
               音频规格
             </th>
-            <th scope="col" style={{ width: "62px", textAlign: "right" }}>
+            <th scope="col" style={{ width: "74px", textAlign: "right" }}>
               时长
             </th>
-            <th scope="col" style={{ width: "92px" }}>
+            <th scope="col" style={{ width: "96px" }}>
               状态 / MD5
+            </th>
+            <th scope="col" style={{ width: "46px", textAlign: "center" }}>
+              <span className="visually-hidden">操作</span>
             </th>
           </tr>
         </thead>
         <tbody>
-          {tracks.length === 0 ? (
-            <tr>
-              <td
-                colSpan={11}
-                style={{
-                  textAlign: "center",
-                  padding: "36px 12px",
-                  color: "var(--text-tertiary)",
-                }}
+          {tracks.map((t) => {
+            const staged = stagedMap.get(t.id);
+            const p = staged?.patch;
+            const isSelected = selectedIds.has(t.id);
+            const isPlaying = playingTrackId === t.id;
+            const hasIssue = t.diagFlags.length > 0;
+            const md5Bad = t.specs.md5Verified === "mismatch";
+            const thumb = p?.coverDataUrl !== undefined ? p.coverDataUrl : t.coverDataUrl;
+
+            return (
+              <tr
+                key={t.id}
+                aria-selected={isSelected}
+                onClick={(e) =>
+                  onSelectTrack(t.id, {
+                    multi: e.metaKey || e.ctrlKey,
+                    range: e.shiftKey,
+                  })
+                }
               >
-                当前筛选下没有匹配的音频文件
-              </td>
-            </tr>
-          ) : (
-            tracks.map((t) => {
-              const staged = stagedMap.get(t.id);
-              const p = staged?.patch;
-              const isSelected = selectedIds.has(t.id);
-              const isPlaying = playingTrackId === t.id;
-              const hasIssue = t.diagFlags.length > 0;
-              const md5Bad = t.specs.md5Verified === "mismatch";
+                <td style={{ textAlign: "center" }}>
+                  <input
+                    type="checkbox"
+                    aria-label={`选择 ${t.title || t.fileName}`}
+                    checked={isSelected}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => onSelectTrack(t.id, { multi: true })}
+                  />
+                </td>
 
-              return (
-                <tr
-                  key={t.id}
-                  aria-selected={isSelected}
-                  onClick={(e) =>
-                    onSelectTrack(t.id, {
-                      multi: e.metaKey || e.ctrlKey,
-                      range: e.shiftKey,
-                    })
-                  }
-                >
-                  <td style={{ textAlign: "center" }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        gap: "4px",
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        aria-label={`选择 ${t.title || t.fileName}`}
-                        checked={isSelected}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={() =>
-                          onSelectTrack(t.id, { multi: true })
-                        }
-                      />
-                    </div>
-                  </td>
+                {renderCell(
+                  t,
+                  "trackNumber",
+                  t.trackNumber != null ? String(t.trackNumber).padStart(2, "0") : "",
+                  p?.trackNumber !== undefined,
+                  "mono"
+                )}
 
-                  {renderCell(
-                    t,
-                    "trackNumber",
-                    t.trackNumber != null
-                      ? String(t.trackNumber).padStart(2, "0")
-                      : "",
-                    p?.trackNumber !== undefined,
-                    "mono"
-                  )}
+                {renderCell(
+                  t,
+                  "title",
+                  t.title || t.fileName,
+                  p?.title !== undefined,
+                  "",
+                  thumb
+                )}
 
-                  {renderCell(
-                    t,
-                    "title",
-                    t.title || t.fileName,
-                    p?.title !== undefined
-                  )}
+                {renderCell(t, "artist", t.artist, p?.artist !== undefined)}
 
-                  {renderCell(t, "artist", t.artist, p?.artist !== undefined)}
+                {renderCell(
+                  t,
+                  "albumArtist",
+                  t.albumArtist,
+                  p?.albumArtist !== undefined
+                )}
 
-                  {renderCell(
-                    t,
-                    "albumArtist",
-                    t.albumArtist,
-                    p?.albumArtist !== undefined
-                  )}
+                {renderCell(t, "album", t.album, p?.album !== undefined)}
 
-                  {renderCell(t, "album", t.album, p?.album !== undefined)}
+                {renderCell(t, "year", t.year, p?.year !== undefined, "mono")}
 
-                  {renderCell(t, "year", t.year, p?.year !== undefined, "mono")}
+                {renderCell(t, "genre", t.genre, p?.genre !== undefined)}
 
-                  {renderCell(t, "genre", t.genre, p?.genre !== undefined)}
+                <td className="mono">
+                  <span className="spec-pill">
+                    {t.specs.codec} {formatRate(t.specs.sampleRate, t.specs.bitDepth)}
+                  </span>
+                </td>
 
-                  <td className="mono">
-                    <span className="spec-pill">
-                      {t.specs.codec} {formatRate(t.specs.sampleRate, t.specs.bitDepth)}
+                <td className="mono" style={{ textAlign: "right" }}>
+                  <button
+                    type="button"
+                    className="chip-btn"
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      padding: "0 4px",
+                      minHeight: "24px",
+                      color: isPlaying ? "var(--accent)" : "var(--text-secondary)",
+                    }}
+                    aria-label={`试听 ${t.title || t.fileName}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPlayTrack(t);
+                    }}
+                  >
+                    <IconPlay size={11} />
+                    <span className="tabular-nums">
+                      {formatDuration(t.specs.durationMs)}
                     </span>
-                  </td>
+                  </button>
+                </td>
 
-                  <td className="mono" style={{ textAlign: "right" }}>
-                    <button
-                      type="button"
-                      className="chip-btn"
-                      style={{
-                        border: "none",
-                        background: "transparent",
-                        padding: "0 4px",
-                        minHeight: "20px",
-                        color: isPlaying ? "var(--accent)" : "var(--text-secondary)",
-                      }}
-                      aria-label={`试听 ${t.title || t.fileName}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onPlayTrack(t);
-                      }}
-                    >
-                      <IconPlay size={10} />
-                      <span className="tabular-nums">
-                        {formatDuration(t.specs.durationMs)}
-                      </span>
-                    </button>
-                  </td>
+                <td className={p?.newFilePath ? "cell-staged" : ""}>
+                  {staged ? (
+                    <span className="field-staged-tag" title={staged.reason}>
+                      已暂存
+                    </span>
+                  ) : md5Bad ? (
+                    <span style={{ color: "var(--status-danger)", fontSize: "11.5px" }}>
+                      <span className="diag-dot danger" />
+                      MD5异常
+                    </span>
+                  ) : hasIssue ? (
+                    <span style={{ color: "var(--staged)", fontSize: "11.5px" }}>
+                      <span className="diag-dot warn" />
+                      待修复({t.diagFlags.length})
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--text-tertiary)", fontSize: "11.5px" }}>
+                      <span className="diag-dot ok" />
+                      完备
+                    </span>
+                  )}
+                </td>
 
-                  <td className={p?.newFilePath ? "cell-staged" : ""}>
-                    {staged ? (
-                      <span
-                        className="field-staged-tag"
-                        title={staged.reason}
-                      >
-                        已暂存
-                      </span>
-                    ) : md5Bad ? (
-                      <span style={{ color: "var(--status-danger)", fontSize: "11px" }}>
-                        <span className="diag-dot danger" />
-                        MD5异常
-                      </span>
-                    ) : hasIssue ? (
-                      <span style={{ color: "var(--staged)", fontSize: "11px" }}>
-                        <span className="diag-dot warn" />
-                        待修复({t.diagFlags.length})
-                      </span>
-                    ) : (
-                      <span style={{ color: "var(--text-tertiary)", fontSize: "11px" }}>
-                        <span className="diag-dot ok" />
-                        完备
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })
-          )}
+                <td style={{ textAlign: "center" }}>
+                  <button
+                    type="button"
+                    className="row-delete-btn"
+                    aria-label={`删除 ${t.title || t.fileName}`}
+                    title={`删除 ${t.title || t.fileName}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRequestDeleteTracks([t.id]);
+                    }}
+                  >
+                    <IconTrash size={14} />
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

@@ -159,3 +159,14 @@ pub struct OnlineSearchResult {
     pub cover_resolution: Option<String>,
     pub tracks: Vec<OnlineTrackMatch>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRoot {
+    pub id: i64,
+    pub path: String,
+    pub label: String,
+    pub added_at: String,
+    pub last_scan: Option<String>,
+    pub track_count: usize,
+}

@@ -1,10 +1,12 @@
 import React, { useRef, useEffect } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   BatchModalKind,
   CenterViewMode,
   ThemePreference,
   WorkspaceMode,
 } from "../types/music";
+import { isTauriEnvironment } from "../services/bridge";
 import {
   IconAWuseLogo,
   IconColumns,
@@ -64,13 +66,39 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   const themeLabel =
     theme === "system" ? "跟随系统" : theme === "dark" ? "暗黑模式" : "浅色模式";
 
+  const handleToolbarMouseDown = (e: React.MouseEvent<HTMLElement>) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    if (
+      target?.closest(
+        "button, input, select, textarea, a, label, .segmented-control, .search-box, .no-drag"
+      )
+    ) {
+      return;
+    }
+    if (!isTauriEnvironment()) return;
+    if (e.detail === 2) {
+      getCurrentWindow().toggleMaximize().catch(() => {});
+    } else {
+      getCurrentWindow().startDragging().catch(() => {});
+    }
+  };
+
   return (
-    <header className="top-toolbar">
-      <div className="toolbar-left">
-        <div className="macos-traffic-spacer" aria-hidden="true" />
-        <h1 className="brand-mark">
+    <header
+      className="top-toolbar"
+      data-tauri-drag-region
+      onMouseDown={handleToolbarMouseDown}
+    >
+      <div className="toolbar-left" data-tauri-drag-region>
+        <div
+          className="macos-traffic-spacer"
+          data-tauri-drag-region
+          aria-hidden="true"
+        />
+        <h1 className="brand-mark" data-tauri-drag-region>
           <IconAWuseLogo size={16} />
-          <span>AWuse</span>
+          <span data-tauri-drag-region>AWuse</span>
         </h1>
 
         <div
@@ -99,8 +127,8 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         </div>
       </div>
 
-      <div className="toolbar-center no-drag">
-        <search className="search-box">
+      <div className="toolbar-center" data-tauri-drag-region>
+        <search className="search-box no-drag">
           <IconSearch size={13} />
           <label htmlFor="global-track-search" className="visually-hidden">
             全文检索曲库标签、歌手、专辑或文件路径
@@ -118,7 +146,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         </search>
       </div>
 
-      <div className="toolbar-right no-drag">
+      <div className="toolbar-right" data-tauri-drag-region>
         <div
           className="segmented-control"
           role="group"

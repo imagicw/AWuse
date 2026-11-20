@@ -170,6 +170,54 @@ export interface OnlineSearchResult {
   tracks: OnlineTrackMatch[];
 }
 
+export interface LibraryRoot {
+  id: number | string;
+  path: string;
+  label: string;
+  addedAt: string;
+  lastScan: string | null;
+  trackCount: number;
+}
+
+export type FinderRuleTarget =
+  | "fileName"
+  | "title"
+  | "artist"
+  | "albumArtist"
+  | "album"
+  | "genre"
+  | "year"
+  | "comment"
+  | "trackNumber";
+
+export type FinderRuleMode = "replace" | "add" | "format" | "template";
+
+export interface FinderBatchRule {
+  targetField: FinderRuleTarget;
+  mode: FinderRuleMode;
+  // Mode 1: replace
+  findText: string;
+  replaceText: string;
+  useRegex: boolean;
+  caseSensitive: boolean;
+  // Mode 2: add
+  addText: string;
+  addPosition: "before" | "after";
+  // Mode 3: format (sequence)
+  formatBaseMode: "keep" | "custom";
+  customBaseText: string;
+  formatPosition: "before" | "after";
+  separator: string;
+  startIndex: number;
+  step: number;
+  zeroPad: number;
+  // Mode 4: template <-> filename
+  templateDirection: "extract_from_filename" | "rename_from_tags";
+  extractPattern: string;
+  renamePattern: string;
+  zeroPadTrack: boolean;
+}
+
 export interface AlbumGroup {
   key: string;
   album: string;

@@ -1,4 +1,5 @@
 import {
+  FinderBatchRule,
   ReorganizePreviewItem,
   ReorganizeRule,
   StagedChange,
@@ -349,4 +350,199 @@ export function previewDirectoryReorganize(
     }
   }
   return items;
+}
+
+function escapeRegExpLiteral(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceWithRule(
+  input: string,
+  regex: RegExp,
+  replaceText: string,
+  useRegex: boolean
+): string {
+  return useRegex
+    ? input.replace(regex, replaceText)
+    : input.replace(regex, () => replaceText);
+}
+
+function splitFileNameParts(fileName: string): { stem: string; dotExt: string } {
+  const idx = fileName.lastIndexOf(".");
+  if (idx <= 0) return { stem: fileName, dotExt: "" };
+  return { stem: fileName.slice(0, idx), dotExt: fileName.slice(idx) };
+}
+
+function buildSiblingFilePath(
+  oldFilePath: string,
+  newStem: string,
+  fallbackExt: string
+): string {
+  const cleanStem = sanitizePathSegment(newStem, "Untitled");
+  const lastSlash = Math.max(oldFilePath.lastIndexOf("/"), oldFilePath.lastIndexOf("\\"));
+  const dir = lastSlash >= 0 ? oldFilePath.slice(0, lastSlash) : "";
+  const sep = oldFilePath.includes("\\") && !oldFilePath.includes("/") ? "\\" : "/";
+  const oldName = lastSlash >= 0 ? oldFilePath.slice(lastSlash + 1) : oldFilePath;
+  const { dotExt } = splitFileNameParts(oldName);
+  const ext = dotExt || (fallbackExt ? `.${fallbackExt}` : "");
+  const nextName = `${cleanStem}${ext}`;
+  return dir ? `${dir}${sep}${nextName}` : nextName;
+}
+
+function renderTagTemplateToStem(track: TrackRecord, pattern: string, zeroPadTrack: boolean): string {
+  const aa = sanitizePathSegment(track.albumArtist || track.artist, "Unknown Artist");
+  const artist = sanitizePathSegment(track.artist, "Unknown Artist");
+  const album = sanitizePathSegment(track.album, "Unknown Album");
+  const year = sanitizePathSegment(track.year, "0000");
+  const disc = String(track.discNumber ?? 1);
+  const trackNum =
+    track.trackNumber != null
+      ? zeroPadTrack
+        ? String(track.trackNumber).padStart(2, "0")
+        : String(track.trackNumber)
+      : "00";
+  const title = sanitizePathSegment(track.title, splitFileNameParts(track.fileName).stem);
+
+  return pattern
+    .replace(/\{AlbumArtist\}/g, aa)
+    .replace(/\{Artist\}/g, artist)
+    .replace(/\{Album\}/g, album)
+    .replace(/\{Year\}/g, year)
+    .replace(/\{DiscNumber\}/g, disc)
+    .replace(/\{TrackNumber\}/g, trackNum)
+    .replace(/\{Title\}/g, title)
+    .replace(/\{Format\}/g, track.specs.codec)
+    .replace(/^\.+/, "");
+}
+
+/**
+ * Apply a Finder-style batch rule (replace text, add prefix/suffix, format with sequence,
+ * or filename <-> tag template conversion) across selected tracks.
+ */
+export function applyFinderBatchRule(
+  tracks: TrackRecord[],
+  rule: FinderBatchRule
+): StagedChange[] {
+  const out: StagedChange[] = [];
+
+  if (rule.mode === "template") {
+    for (const t of tracks) {
+      if (rule.templateDirection === "extract_from_filename") {
+        const patch = parseFilenamePattern(t.fileName, rule.extractPattern);
+        if (patch) {
+          out.push({
+            trackId: t.id,
+            patch,
+            reason: `文件名提取标签 (${rule.extractPattern})`,
+          });
+        }
+      } else {
+        const nextStem = renderTagTemplateToStem(t, rule.renamePattern, rule.zeroPadTrack);
+        const newFilePath = buildSiblingFilePath(t.filePath, nextStem, t.extension);
+        if (newFilePath !== t.filePath) {
+          out.push({
+            trackId: t.id,
+            patch: { newFilePath },
+            reason: `按标签重命名文件 (${rule.renamePattern})`,
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  let compiledRegex: RegExp | null = null;
+  if (rule.mode === "replace") {
+    if (!rule.findText) return [];
+    try {
+      const flags = rule.caseSensitive ? "g" : "gi";
+      const pattern = rule.useRegex ? rule.findText : escapeRegExpLiteral(rule.findText);
+      compiledRegex = new RegExp(pattern, flags);
+    } catch {
+      return [];
+    }
+  }
+
+  const safeStep = Number.isFinite(rule.step) && rule.step !== 0 ? rule.step : 1;
+  const safeStart = Number.isFinite(rule.startIndex) ? rule.startIndex : 1;
+  const safePad = Math.max(0, Math.min(8, Math.floor(rule.zeroPad || 0)));
+
+  tracks.forEach((t, idx) => {
+    if (rule.targetField === "trackNumber") {
+      if (rule.mode === "format") {
+        const seq = safeStart + idx * safeStep;
+        if (seq >= 0 && seq !== t.trackNumber) {
+          out.push({
+            trackId: t.id,
+            patch: { trackNumber: seq },
+            reason: "批量递增音轨号",
+          });
+        }
+        return;
+      }
+      const curStr = t.trackNumber != null ? String(t.trackNumber) : "";
+      let nextStr = curStr;
+      if (rule.mode === "replace" && compiledRegex) {
+        nextStr = replaceWithRule(curStr, compiledRegex, rule.replaceText, rule.useRegex);
+      } else if (rule.mode === "add" && rule.addText) {
+        nextStr = rule.addPosition === "before" ? `${rule.addText}${curStr}` : `${curStr}${rule.addText}`;
+      }
+      if (nextStr !== curStr) {
+        const parsed = nextStr.trim() === "" ? null : parseInt(nextStr.trim(), 10);
+        if (parsed === null || Number.isFinite(parsed)) {
+          out.push({
+            trackId: t.id,
+            patch: { trackNumber: parsed },
+            reason: "批量修改音轨号",
+          });
+        }
+      }
+      return;
+    }
+
+    const curVal =
+      rule.targetField === "fileName"
+        ? splitFileNameParts(t.fileName).stem
+        : String(t[rule.targetField] ?? "");
+
+    let nextVal = curVal;
+    if (rule.mode === "replace" && compiledRegex) {
+      nextVal = replaceWithRule(curVal, compiledRegex, rule.replaceText, rule.useRegex);
+    } else if (rule.mode === "add") {
+      if (!rule.addText) return;
+      nextVal =
+        rule.addPosition === "before"
+          ? `${rule.addText}${curVal}`
+          : `${curVal}${rule.addText}`;
+    } else if (rule.mode === "format") {
+      const seqNum = Math.max(0, safeStart + idx * safeStep);
+      const seqStr = safePad > 0 ? String(seqNum).padStart(safePad, "0") : String(seqNum);
+      const base = rule.formatBaseMode === "custom" ? rule.customBaseText : curVal;
+      nextVal =
+        rule.formatPosition === "before"
+          ? `${seqStr}${rule.separator}${base}`
+          : `${base}${rule.separator}${seqStr}`;
+    }
+
+    if (nextVal === curVal) return;
+
+    if (rule.targetField === "fileName") {
+      const newFilePath = buildSiblingFilePath(t.filePath, nextVal, t.extension);
+      if (newFilePath !== t.filePath) {
+        out.push({
+          trackId: t.id,
+          patch: { newFilePath },
+          reason: `批量重命名 (${rule.mode})`,
+        });
+      }
+    } else {
+      out.push({
+        trackId: t.id,
+        patch: { [rule.targetField]: nextVal },
+        reason: `批量规则修改 ${rule.targetField}`,
+      });
+    }
+  });
+
+  return out;
 }

@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use chrono::Utc;
 use rusqlite::{params, Connection};
 
-use crate::models::{DiagnosticSummary, TrackRecord, TransactionItem, TransactionRecord};
+use crate::models::{DiagnosticSummary, LibraryRoot, TrackRecord, TransactionItem, TransactionRecord};
 
 pub struct LibraryDb {
     pub conn: Mutex<Connection>,
@@ -384,6 +385,162 @@ impl LibraryDb {
             }
         }
         Ok(summary)
+    }
+
+    pub fn upsert_library_root(&self, path: &str, label: &str) -> Result<LibraryRoot, String> {
+        let norm_path = normalize_root_path(path);
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO library_roots (path, label, added_at, last_scan)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(path) DO UPDATE SET
+               label = excluded.label,
+               last_scan = excluded.last_scan",
+            params![norm_path, label, now],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let prefix = dir_prefix(&norm_path);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE substr(file_path, 1, length(?1)) = ?1",
+                params![prefix],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        conn.query_row(
+            "SELECT id, path, label, added_at, last_scan FROM library_roots WHERE path = ?1",
+            params![norm_path],
+            |row| {
+                Ok(LibraryRoot {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    label: row.get(2)?,
+                    added_at: row.get(3)?,
+                    last_scan: row.get(4)?,
+                    track_count: count as usize,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn list_library_roots(&self) -> Result<Vec<LibraryRoot>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, path, label, added_at, last_scan FROM library_roots ORDER BY id ASC")
+            .map_err(|e| e.to_string())?;
+        let mut roots = stmt
+            .query_map([], |row| {
+                Ok(LibraryRoot {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    label: row.get(2)?,
+                    added_at: row.get(3)?,
+                    last_scan: row.get(4)?,
+                    track_count: 0,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        for r in &mut roots {
+            let prefix = dir_prefix(&r.path);
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tracks WHERE substr(file_path, 1, length(?1)) = ?1",
+                    params![prefix],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            r.track_count = count as usize;
+        }
+        Ok(roots)
+    }
+
+    pub fn remove_library_root(&self, path: &str) -> Result<(), String> {
+        let norm_path = normalize_root_path(path);
+        let prefix = dir_prefix(&norm_path);
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        tx.execute(
+            "DELETE FROM tracks_fts WHERE track_id IN (SELECT id FROM tracks WHERE substr(file_path, 1, length(?1)) = ?1)",
+            params![prefix],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM tracks WHERE substr(file_path, 1, length(?1)) = ?1",
+            params![prefix],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM library_roots WHERE path = ?1 OR path = ?2",
+            params![norm_path, path],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn get_track_paths(&self, track_ids: &[String]) -> Result<Vec<String>, String> {
+        if track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT file_path FROM tracks WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for id in track_ids {
+            if let Ok(path) = stmt.query_row(params![id], |r| r.get::<_, String>(0)) {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn delete_tracks(&self, track_ids: &[String]) -> Result<usize, String> {
+        if track_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut deleted = 0usize;
+        {
+            let mut del_fts = tx
+                .prepare("DELETE FROM tracks_fts WHERE track_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let mut del_track = tx
+                .prepare("DELETE FROM tracks WHERE id = ?1")
+                .map_err(|e| e.to_string())?;
+            for id in track_ids {
+                del_fts.execute(params![id]).map_err(|e| e.to_string())?;
+                deleted += del_track.execute(params![id]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(deleted)
+    }
+}
+
+fn normalize_root_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed == "/" {
+        "/".to_string()
+    } else {
+        trimmed.trim_end_matches(['/', '\\']).to_string()
+    }
+}
+
+fn dir_prefix(norm_path: &str) -> String {
+    if norm_path == "/" {
+        "/".to_string()
+    } else {
+        format!("{norm_path}/")
     }
 }
 

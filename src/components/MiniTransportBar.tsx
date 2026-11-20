@@ -168,27 +168,24 @@ export const MiniTransportBar: React.FC<MiniTransportBarProps> = ({
   return (
     <footer className="transport-bar" aria-label="音频快速试听与实时歌词栏">
       <div className="transport-now">
-        {track?.coverDataUrl ? (
-          <img
-            src={track.coverDataUrl}
-            alt=""
-            className="transport-thumb"
-            width={34}
-            height={34}
-          />
-        ) : (
-          <div
-            className="transport-thumb"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--text-tertiary)",
-            }}
-          >
-            <IconDisc size={16} />
-          </div>
-        )}
+        <div
+          className={`transport-vinyl-disc ${isPlaying && track ? "playing" : ""}`}
+          aria-hidden="true"
+        >
+          {track?.coverDataUrl ? (
+            <img
+              src={track.coverDataUrl}
+              alt=""
+              className="transport-thumb"
+              width={32}
+              height={32}
+            />
+          ) : (
+            <div className="transport-thumb">
+              <IconDisc size={15} />
+            </div>
+          )}
+        </div>
         <div style={{ minWidth: 0 }}>
           <div
             style={{

@@ -4,6 +4,7 @@ import { ProSpreadsheetView } from "./ProSpreadsheetView";
 
 interface ColumnBrowserViewProps {
   tracks: TrackRecord[];
+  hasAnyTracks: boolean;
   selectedIds: Set<string>;
   stagedMap: Map<string, StagedChange>;
   playingTrackId: string | null;
@@ -11,10 +12,15 @@ interface ColumnBrowserViewProps {
   onSelectAll: (ids: string[]) => void;
   onStageFieldEdit: (trackId: string, patch: TagPatch, reason: string) => void;
   onPlayTrack: (track: TrackRecord) => void;
+  onRequestDeleteTracks: (trackIds: string[]) => void;
+  onAddDirectory: () => void;
+  onTriggerFileImport: () => void;
+  onClearFilters: () => void;
 }
 
 export const ColumnBrowserView: React.FC<ColumnBrowserViewProps> = ({
   tracks,
+  hasAnyTracks,
   selectedIds,
   stagedMap,
   playingTrackId,
@@ -22,6 +28,10 @@ export const ColumnBrowserView: React.FC<ColumnBrowserViewProps> = ({
   onSelectAll,
   onStageFieldEdit,
   onPlayTrack,
+  onRequestDeleteTracks,
+  onAddDirectory,
+  onTriggerFileImport,
+  onClearFilters,
 }) => {
   const [selectedArtist, setSelectedArtist] = useState<string>("__ALL__");
   const [selectedAlbum, setSelectedAlbum] = useState<string>("__ALL__");
@@ -185,6 +195,7 @@ export const ColumnBrowserView: React.FC<ColumnBrowserViewProps> = ({
 
       <ProSpreadsheetView
         tracks={finalTracks}
+        hasAnyTracks={hasAnyTracks}
         selectedIds={selectedIds}
         stagedMap={stagedMap}
         playingTrackId={playingTrackId}
@@ -192,6 +203,10 @@ export const ColumnBrowserView: React.FC<ColumnBrowserViewProps> = ({
         onSelectAll={onSelectAll}
         onStageFieldEdit={onStageFieldEdit}
         onPlayTrack={onPlayTrack}
+        onRequestDeleteTracks={onRequestDeleteTracks}
+        onAddDirectory={onAddDirectory}
+        onTriggerFileImport={onTriggerFileImport}
+        onClearFilters={onClearFilters}
       />
     </div>
   );

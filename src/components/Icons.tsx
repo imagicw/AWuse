@@ -193,3 +193,62 @@ export const IconClose: React.FC<IconProps> = ({ size, className }) => (
     <path d="m18 6-12 12" />
   </svg>
 );
+
+export const IconTrash: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M4.5 7h15" />
+    <path d="M9.5 4h5a1 1 0 0 1 1 1v2h-7V5a1 1 0 0 1 1-1Z" />
+    <path d="M6.5 7l.9 11.5a1.5 1.5 0 0 0 1.5 1.5h6.2a1.5 1.5 0 0 0 1.5-1.5L17.5 7" />
+    <path d="M10 11v5" />
+    <path d="M14 11v5" />
+  </svg>
+);
+
+export const IconFolderPlus: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M3.5 7.5a2 2 0 0 1 2-2h4.2l1.8 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-10Z" />
+    <path d="M12 11.5v5" />
+    <path d="M9.5 14h5" />
+  </svg>
+);
+
+export const IconFolder: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M3.5 7.5a2 2 0 0 1 2-2h4.2l1.8 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-10Z" />
+  </svg>
+);
+
+export const IconRefresh: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M20 11a8 8 0 0 0-14.5-4.3L4 8.5" />
+    <path d="M4 4v4.5h4.5" />
+    <path d="M4 13a8 8 0 0 0 14.5 4.3L20 15.5" />
+    <path d="M20 20v-4.5h-4.5" />
+  </svg>
+);
+
+export const IconFilter: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M4 6h16" />
+    <path d="M7 12h10" />
+    <path d="M10 18h4" />
+  </svg>
+);
+
+export const IconVinylRecord: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <circle cx="12" cy="12" r="9.5" />
+    <circle cx="12" cy="12" r="6.5" strokeOpacity="0.45" strokeWidth="1" />
+    <circle cx="12" cy="12" r="3.2" />
+    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconEditRule: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M4 7h10" />
+    <path d="M4 12h7" />
+    <path d="M4 17h5" />
+    <path d="m14.5 16.5 4.8-4.8a1.4 1.4 0 0 1 2 2l-4.8 4.8-2.6.6.6-2.6Z" />
+  </svg>
+);

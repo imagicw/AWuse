@@ -11,6 +11,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use rayon::prelude::*;
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use walkdir::WalkDir;
 
 use crate::audio_engine::{is_supported_audio, read_track_metadata, verify_flac_md5_integrity, write_tag_patch_to_file};
@@ -20,8 +21,8 @@ use crate::batch_tools::{
 };
 use crate::library_db::LibraryDb;
 use crate::models::{
-    DiagnosticSummary, OnlineSearchResult, ReorganizePreviewItem, ReorganizeRule, StagedChange,
-    TagPatch, TrackRecord, TransactionItem, TransactionRecord,
+    DiagnosticSummary, LibraryRoot, OnlineSearchResult, ReorganizePreviewItem, ReorganizeRule,
+    StagedChange, TagPatch, TrackRecord, TransactionItem, TransactionRecord,
 };
 use crate::organizer::{execute_move_with_companions, preview_reorganize};
 use crate::scraper::search_online_metadata;
@@ -29,6 +30,23 @@ use crate::scraper::search_online_metadata;
 pub struct AppState {
     pub db: Arc<LibraryDb>,
     pub cover_cache_dir: PathBuf,
+}
+
+fn attach_cached_covers(tracks: &mut [TrackRecord], cover_cache_dir: &Path) {
+    for t in tracks {
+        if t.cover_data_url.is_some() {
+            continue;
+        }
+        if let Some(hash) = &t.cover_hash {
+            for ext in ["jpg", "png", "webp"] {
+                let candidate = cover_cache_dir.join(format!("{hash}.{ext}"));
+                if candidate.exists() {
+                    t.cover_data_url = Some(candidate.to_string_lossy().to_string());
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -48,12 +66,19 @@ async fn scan_directory(
     let cache_dir = state.cover_cache_dir.clone();
     let mode = workspace_mode.clone();
 
-    let tracks: Vec<TrackRecord> = paths
+    let mut tracks: Vec<TrackRecord> = paths
         .par_iter()
         .filter_map(|p| read_track_metadata(p, &mode, Some(&cache_dir)).ok())
         .collect();
 
     state.db.upsert_tracks(&tracks)?;
+    let label = Path::new(&dir_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&dir_path);
+    state.db.upsert_library_root(&dir_path, label)?;
+    attach_cached_covers(&mut tracks, &state.cover_cache_dir);
     Ok(tracks)
 }
 
@@ -63,9 +88,58 @@ async fn query_tracks(
     workspace_mode: String,
     search_query: Option<String>,
 ) -> Result<Vec<TrackRecord>, String> {
-    state
+    let mut tracks = state
         .db
-        .query_tracks(&workspace_mode, search_query.as_deref())
+        .query_tracks(&workspace_mode, search_query.as_deref())?;
+    attach_cached_covers(&mut tracks, &state.cover_cache_dir);
+    Ok(tracks)
+}
+
+#[tauri::command]
+async fn pick_directory_dialog(app: AppHandle) -> Result<Option<String>, String> {
+    let app_clone = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app_clone.dialog().file().blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| format!("文件夹选择器线程异常: {e}"))?;
+
+    match picked {
+        Some(file_path) => match file_path.into_path() {
+            Ok(p) => Ok(Some(p.to_string_lossy().to_string())),
+            Err(e) => Err(format!("无法解析所选目录路径: {e}")),
+        },
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn list_library_roots(state: State<'_, AppState>) -> Result<Vec<LibraryRoot>, String> {
+    state.db.list_library_roots()
+}
+
+#[tauri::command]
+async fn remove_library_root(state: State<'_, AppState>, dir_path: String) -> Result<(), String> {
+    state.db.remove_library_root(&dir_path)
+}
+
+#[tauri::command]
+async fn delete_tracks_cmd(
+    state: State<'_, AppState>,
+    track_ids: Vec<String>,
+    delete_from_disk: bool,
+) -> Result<usize, String> {
+    if delete_from_disk {
+        let paths = state.db.get_track_paths(&track_ids)?;
+        for path_str in paths {
+            let p = Path::new(&path_str);
+            if p.exists() {
+                std::fs::remove_file(p)
+                    .map_err(|e| format!("删除本地文件失败 ({}): {e}", p.display()))?;
+            }
+        }
+    }
+    state.db.delete_tracks(&track_ids)
 }
 
 #[tauri::command]
@@ -268,6 +342,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_directory,
             query_tracks,
+            pick_directory_dialog,
+            list_library_roots,
+            remove_library_root,
+            delete_tracks_cmd,
             get_diagnostics,
             commit_staged_changes,
             preview_directory_reorganize,

@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   BatchModalKind,
+  FinderBatchRule,
+  FinderRuleMode,
+  FinderRuleTarget,
   OnlineSearchResult,
   ReorganizePreviewItem,
   ReorganizeRule,
@@ -10,10 +13,10 @@ import {
   TransactionRecord,
 } from "../types/music";
 import {
+  applyFinderBatchRule,
   convertTraditionalSimplified,
   looksLikeMojibake,
   normalizeCjkPunctuation,
-  parseFilenamePattern,
   repairMojibake,
   toPinyinSortKey,
 } from "../services/cjkAndBatchEngine";
@@ -120,12 +123,28 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
   // 2. Unify state
   const [unifyPreview, setUnifyPreview] = useState<StagedChange[]>([]);
 
-  // 3. Filename & Regex state
-  const [fnMode, setFnMode] = useState<"extract" | "regex">("extract");
-  const [fnPattern, setFnPattern] = useState("%track% - %artist% - %title%");
-  const [regexField, setRegexField] = useState<"title" | "artist" | "album">("title");
-  const [regexSearch, setRegexSearch] = useState("\\s*\\(Live\\)");
-  const [regexReplace, setRegexReplace] = useState(" [Live]");
+  // 3. Finder-style Batch Rule Modifier state
+  const [finderRule, setFinderRule] = useState<FinderBatchRule>({
+    targetField: "fileName",
+    mode: "replace",
+    findText: "",
+    replaceText: "",
+    useRegex: false,
+    caseSensitive: false,
+    addText: "",
+    addPosition: "before",
+    formatBaseMode: "keep",
+    customBaseText: "Track",
+    formatPosition: "before",
+    separator: " - ",
+    startIndex: 1,
+    step: 1,
+    zeroPad: 2,
+    templateDirection: "extract_from_filename",
+    extractPattern: "%track% - %artist% - %title%",
+    renamePattern: "{TrackNumber} - {Artist} - {Title}",
+    zeroPadTrack: true,
+  });
 
   // 4. CJK state
   const [cjkFixMojibake, setCjkFixMojibake] = useState(true);
@@ -207,48 +226,51 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
       const first = targetTracks[0];
       const defaultQ = first
         ? `${first.albumArtist || first.artist} ${first.album}`.trim()
-        : "范特西";
+        : "";
       setScraperQuery(defaultQ);
-      setScraperLoading(true);
-      bridgeSearchOnlineReleases(scraperSource, defaultQ)
-        .then(setScraperResults)
-        .finally(() => setScraperLoading(false));
+      if (defaultQ) {
+        setScraperLoading(true);
+        bridgeSearchOnlineReleases(scraperSource, defaultQ)
+          .then(setScraperResults)
+          .finally(() => setScraperLoading(false));
+      } else {
+        setScraperResults([]);
+      }
     }
   }, [modalKind]);
 
-  // Filename / Regex live preview
-  const filenameOrRegexChanges = useMemo<StagedChange[]>(() => {
+  // Finder-style batch rule live preview
+  const finderRegexValid = useMemo(() => {
+    if (finderRule.mode !== "replace" || !finderRule.useRegex || !finderRule.findText) {
+      return true;
+    }
+    try {
+      new RegExp(finderRule.findText);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [finderRule.mode, finderRule.useRegex, finderRule.findText]);
+
+  const finderChanges = useMemo<StagedChange[]>(() => {
     if (modalKind !== "filename") return [];
-    const changes: StagedChange[] = [];
-    for (const t of targetTracks) {
-      if (fnMode === "extract") {
-        const patch = parseFilenamePattern(t.fileName, fnPattern);
-        if (patch) {
-          changes.push({
-            trackId: t.id,
-            patch,
-            reason: `文件名解析 (${fnPattern})`,
-          });
-        }
-      } else {
-        try {
-          const re = new RegExp(regexSearch, "g");
-          const cur = t[regexField];
-          const next = cur.replace(re, regexReplace);
-          if (next !== cur) {
-            changes.push({
-              trackId: t.id,
-              patch: { [regexField]: next },
-              reason: `正则替换 ${regexField}`,
-            });
-          }
-        } catch {
-          return [];
-        }
+    return applyFinderBatchRule(targetTracks, finderRule);
+  }, [modalKind, targetTracks, finderRule]);
+
+  const finderCollisionPaths = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of finderChanges) {
+      if (c.patch.newFilePath) {
+        const key = c.patch.newFilePath.toLowerCase();
+        counts.set(key, (counts.get(key) ?? 0) + 1);
       }
     }
-    return changes;
-  }, [modalKind, targetTracks, fnMode, fnPattern, regexField, regexSearch, regexReplace]);
+    const dupes = new Set<string>();
+    for (const [k, n] of counts) {
+      if (n > 1) dupes.add(k);
+    }
+    return dupes;
+  }, [finderChanges]);
 
   // CJK Cleaner live preview
   const cjkChanges = useMemo<StagedChange[]>(() => {
@@ -308,7 +330,7 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
   const modalTitles: Record<Exclude<BatchModalKind, null>, string> = {
     reorganize: `物理目录重整引擎 (${targetTracks.length} 首作用目标)`,
     unify: `散碎专辑与 Feat. 歌手归并 (${targetTracks.length} 首扫描目标)`,
-    filename: `文件名 ⇄ 标签解析与正则批处理 (${targetTracks.length} 首)`,
+    filename: `Finder 式批量规则修改器 (${targetTracks.length} 首作用目标)`,
     cjk: `CJK 曲库清洗与拼音排序标签生成 (${targetTracks.length} 首)`,
     scraper: `全球 / 华语多源元数据与高清封面刮削`,
     staged_queue: `暂存事务队列与历史回滚`,
@@ -552,105 +574,514 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
         </>
       )}
 
-      {/* 3. Filename <-> Tag & Regex */}
+      {/* 3. Finder-style Batch Rule Modifier */}
       {modalKind === "filename" && (
         <>
           <div className="dialog-body scroller">
-            <div className="segmented-control" role="group" aria-label="转换模式">
-              <button
-                type="button"
-                className="seg-btn"
-                aria-pressed={fnMode === "extract"}
-                onClick={() => setFnMode("extract")}
+            <div className="finder-rule-card">
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                }}
               >
-                文件名提取标签 (%track% - %artist% - %title%)
-              </button>
-              <button
-                type="button"
-                className="seg-btn"
-                aria-pressed={fnMode === "regex"}
-                onClick={() => setFnMode("regex")}
-              >
-                正则查找替换
-              </button>
-            </div>
+                <div className="segmented-control" role="group" aria-label="批量规则模式">
+                  {(
+                    [
+                      ["replace", "替换文本"],
+                      ["add", "添加文本"],
+                      ["format", "格式与序号"],
+                      ["template", "文件名 ⇄ 标签"],
+                    ] as Array<[FinderRuleMode, string]>
+                  ).map(([modeKey, label]) => (
+                    <button
+                      key={modeKey}
+                      type="button"
+                      className="seg-btn"
+                      aria-pressed={finderRule.mode === modeKey}
+                      onClick={() =>
+                        setFinderRule((prev) => ({ ...prev, mode: modeKey }))
+                      }
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
 
-            {fnMode === "extract" ? (
-              <div className="field-group">
-                <label className="field-label" htmlFor="fn-pattern-input">
-                  文件名解析模板（可用占位符：%track% %disc% %year% %artist% %album_artist% %album% %title%）
-                </label>
-                <input
-                  id="fn-pattern-input"
-                  type="text"
-                  className="field-input mono"
-                  value={fnPattern}
-                  onChange={(e) => setFnPattern(e.target.value)}
-                />
+                {finderRule.mode !== "template" && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <label
+                      htmlFor="finder-target-field"
+                      style={{
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        color: "var(--text-secondary)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      作用字段
+                    </label>
+                    <select
+                      id="finder-target-field"
+                      className="field-input"
+                      style={{ width: "210px" }}
+                      value={finderRule.targetField}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({
+                          ...prev,
+                          targetField: e.target.value as FinderRuleTarget,
+                        }))
+                      }
+                    >
+                      <option value="fileName">物理文件名 (保留原扩展名)</option>
+                      <option value="title">曲目标题 (Title)</option>
+                      <option value="artist">歌手 (Artist)</option>
+                      <option value="albumArtist">专辑歌手 (Album Artist)</option>
+                      <option value="album">专辑名称 (Album)</option>
+                      <option value="year">发行年份 (Year)</option>
+                      <option value="genre">音乐流派 (Genre)</option>
+                      <option value="comment">备注 (Comment)</option>
+                      <option value="trackNumber">音轨号 (Track #)</option>
+                    </select>
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="inspector-field-grid">
-                <div className="field-group">
-                  <label className="field-label" htmlFor="re-field">目标字段</label>
-                  <select
-                    id="re-field"
-                    className="field-input"
-                    value={regexField}
-                    onChange={(e) => setRegexField(e.target.value as "title" | "artist" | "album")}
+
+              {finderRule.mode === "replace" && (
+                <div className="inspector-field-grid">
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="finder-find">
+                      <span>查找内容</span>
+                      {!finderRegexValid && (
+                        <span style={{ color: "var(--status-danger)" }}>
+                          正则语法无效
+                        </span>
+                      )}
+                    </label>
+                    <input
+                      id="finder-find"
+                      type="text"
+                      className="field-input mono"
+                      placeholder={
+                        finderRule.useRegex
+                          ? "例如：\\s*\\(Live\\)"
+                          : "输入要查找的文字或符号…"
+                      }
+                      value={finderRule.findText}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({ ...prev, findText: e.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="finder-replace">
+                      替换为（留空即删除匹配文本）
+                    </label>
+                    <input
+                      id="finder-replace"
+                      type="text"
+                      className="field-input mono"
+                      placeholder="输入替换后文本…"
+                      value={finderRule.replaceText}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({
+                          ...prev,
+                          replaceText: e.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div
+                    className="field-group full"
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: "18px",
+                      fontSize: "12.5px",
+                    }}
                   >
-                    <option value="title">标题 (Title)</option>
-                    <option value="artist">歌手 (Artist)</option>
-                    <option value="album">专辑 (Album)</option>
-                  </select>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                      <input
+                        type="checkbox"
+                        checked={finderRule.caseSensitive}
+                        onChange={(e) =>
+                          setFinderRule((prev) => ({
+                            ...prev,
+                            caseSensitive: e.target.checked,
+                          }))
+                        }
+                      />
+                      <span>区分大小写</span>
+                    </label>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                      <input
+                        type="checkbox"
+                        checked={finderRule.useRegex}
+                        onChange={(e) =>
+                          setFinderRule((prev) => ({
+                            ...prev,
+                            useRegex: e.target.checked,
+                          }))
+                        }
+                      />
+                      <span>启用正则表达式 (RegExp)</span>
+                    </label>
+                  </div>
                 </div>
-                <div className="field-group">
-                  <label className="field-label" htmlFor="re-search">正则表达式</label>
-                  <input
-                    id="re-search"
-                    type="text"
-                    className="field-input mono"
-                    value={regexSearch}
-                    onChange={(e) => setRegexSearch(e.target.value)}
-                  />
+              )}
+
+              {finderRule.mode === "add" && (
+                <div className="inspector-field-grid">
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="finder-add-pos">
+                      插入位置
+                    </label>
+                    <select
+                      id="finder-add-pos"
+                      className="field-input"
+                      value={finderRule.addPosition}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({
+                          ...prev,
+                          addPosition: e.target.value as "before" | "after",
+                        }))
+                      }
+                    >
+                      <option value="before">名称之前（添加前缀）</option>
+                      <option value="after">
+                        {finderRule.targetField === "fileName"
+                          ? "名称之后 / 扩展名之前（添加后缀）"
+                          : "名称之后（添加后缀）"}
+                      </option>
+                    </select>
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="finder-add-text">
+                      添加文本内容
+                    </label>
+                    <input
+                      id="finder-add-text"
+                      type="text"
+                      className="field-input"
+                      placeholder="例如：[Hi-Res] "
+                      value={finderRule.addText}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({ ...prev, addText: e.target.value }))
+                      }
+                    />
+                  </div>
                 </div>
-                <div className="field-group full">
-                  <label className="field-label" htmlFor="re-replace">替换为</label>
-                  <input
-                    id="re-replace"
-                    type="text"
-                    className="field-input mono"
-                    value={regexReplace}
-                    onChange={(e) => setRegexReplace(e.target.value)}
-                  />
+              )}
+
+              {finderRule.mode === "format" && (
+                <div className="inspector-field-grid">
+                  {finderRule.targetField !== "trackNumber" && (
+                    <>
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="finder-fmt-base">
+                          名称格式
+                        </label>
+                        <select
+                          id="finder-fmt-base"
+                          className="field-input"
+                          value={finderRule.formatBaseMode}
+                          onChange={(e) =>
+                            setFinderRule((prev) => ({
+                              ...prev,
+                              formatBaseMode: e.target.value as "keep" | "custom",
+                            }))
+                          }
+                        >
+                          <option value="keep">保留原名称 + 递增序号</option>
+                          <option value="custom">自定义名称 + 递增序号</option>
+                        </select>
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="finder-fmt-pos">
+                          序号位置
+                        </label>
+                        <select
+                          id="finder-fmt-pos"
+                          className="field-input"
+                          value={finderRule.formatPosition}
+                          onChange={(e) =>
+                            setFinderRule((prev) => ({
+                              ...prev,
+                              formatPosition: e.target.value as "before" | "after",
+                            }))
+                          }
+                        >
+                          <option value="before">名称之前（如 01 - 曲名）</option>
+                          <option value="after">名称之后（如 曲名 - 01）</option>
+                        </select>
+                      </div>
+                      {finderRule.formatBaseMode === "custom" && (
+                        <div className="field-group">
+                          <label className="field-label" htmlFor="finder-fmt-custom">
+                            自定义基础名称
+                          </label>
+                          <input
+                            id="finder-fmt-custom"
+                            type="text"
+                            className="field-input"
+                            value={finderRule.customBaseText}
+                            onChange={(e) =>
+                              setFinderRule((prev) => ({
+                                ...prev,
+                                customBaseText: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      )}
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="finder-fmt-sep">
+                          连接分隔符
+                        </label>
+                        <input
+                          id="finder-fmt-sep"
+                          type="text"
+                          className="field-input mono"
+                          value={finderRule.separator}
+                          onChange={(e) =>
+                            setFinderRule((prev) => ({
+                              ...prev,
+                              separator: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </>
+                  )}
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="finder-fmt-start">
+                      起始数字
+                    </label>
+                    <input
+                      id="finder-fmt-start"
+                      type="number"
+                      className="field-input mono"
+                      value={finderRule.startIndex}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({
+                          ...prev,
+                          startIndex: parseInt(e.target.value, 10) || 0,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="finder-fmt-step">
+                      递增步长
+                    </label>
+                    <input
+                      id="finder-fmt-step"
+                      type="number"
+                      min={1}
+                      className="field-input mono"
+                      value={finderRule.step}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({
+                          ...prev,
+                          step: Math.max(1, parseInt(e.target.value, 10) || 1),
+                        }))
+                      }
+                    />
+                  </div>
+                  {finderRule.targetField !== "trackNumber" && (
+                    <div className="field-group">
+                      <label className="field-label" htmlFor="finder-fmt-pad">
+                        补零位数 (0=不补零, 2=01)
+                      </label>
+                      <input
+                        id="finder-fmt-pad"
+                        type="number"
+                        min={0}
+                        max={6}
+                        className="field-input mono"
+                        value={finderRule.zeroPad}
+                        onChange={(e) =>
+                          setFinderRule((prev) => ({
+                            ...prev,
+                            zeroPad: Math.max(
+                              0,
+                              Math.min(6, parseInt(e.target.value, 10) || 0)
+                            ),
+                          }))
+                        }
+                      />
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              )}
+
+              {finderRule.mode === "template" && (
+                <div className="inspector-field-grid">
+                  <div className="field-group full">
+                    <label className="field-label" htmlFor="finder-tpl-dir">
+                      转换方向
+                    </label>
+                    <select
+                      id="finder-tpl-dir"
+                      className="field-input"
+                      value={finderRule.templateDirection}
+                      onChange={(e) =>
+                        setFinderRule((prev) => ({
+                          ...prev,
+                          templateDirection: e.target.value as
+                            | "extract_from_filename"
+                            | "rename_from_tags",
+                        }))
+                      }
+                    >
+                      <option value="extract_from_filename">
+                        从文件名解析提取元数据标签 (%track% - %artist% - %title%)
+                      </option>
+                      <option value="rename_from_tags">
+                        根据现有元数据标签批量重命名文件 ({"{TrackNumber} - {Artist} - {Title}"})
+                      </option>
+                    </select>
+                  </div>
+                  {finderRule.templateDirection === "extract_from_filename" ? (
+                    <div className="field-group full">
+                      <label className="field-label" htmlFor="fn-pattern-input">
+                        解析模板（占位符：%track% %disc% %year% %artist% %album_artist% %album% %title%）
+                      </label>
+                      <input
+                        id="fn-pattern-input"
+                        type="text"
+                        className="field-input mono"
+                        value={finderRule.extractPattern}
+                        onChange={(e) =>
+                          setFinderRule((prev) => ({
+                            ...prev,
+                            extractPattern: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="field-group full">
+                        <label className="field-label" htmlFor="fn-rename-tpl">
+                          文件名生成模板（占位符：{"{TrackNumber} {DiscNumber} {Artist} {AlbumArtist} {Album} {Title} {Year} {Format}"}）
+                        </label>
+                        <input
+                          id="fn-rename-tpl"
+                          type="text"
+                          className="field-input mono"
+                          value={finderRule.renamePattern}
+                          onChange={(e) =>
+                            setFinderRule((prev) => ({
+                              ...prev,
+                              renamePattern: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <label
+                        className="field-group full"
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: "7px",
+                          fontSize: "12.5px",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={finderRule.zeroPadTrack}
+                          onChange={(e) =>
+                            setFinderRule((prev) => ({
+                              ...prev,
+                              zeroPadTrack: e.target.checked,
+                            }))
+                          }
+                        />
+                        <span>音轨号自动补零至两位 (01, 02…)</span>
+                      </label>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
 
             <table className="diff-table">
               <thead>
                 <tr>
-                  <th scope="col">文件名</th>
-                  <th scope="col">解析 / 替换结果预览</th>
+                  <th scope="col" style={{ width: "36%" }}>
+                    当前内容 (修改前)
+                  </th>
+                  <th scope="col">规则应用预览 (Dry-Run Diff)</th>
+                  <th scope="col" style={{ width: "110px" }}>
+                    状态
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {filenameOrRegexChanges.length === 0 ? (
+                {finderChanges.length === 0 ? (
                   <tr>
-                    <td colSpan={2} style={{ color: "var(--text-tertiary)", textAlign: "center", padding: "18px" }}>
-                      当前规则无匹配变更，可调整模式或选中待解析音轨。
+                    <td
+                      colSpan={3}
+                      style={{
+                        color: "var(--text-tertiary)",
+                        textAlign: "center",
+                        padding: "24px",
+                      }}
+                    >
+                      当前规则无匹配变更，可调整查找内容、作用字段或选中目标音轨。
                     </td>
                   </tr>
                 ) : (
-                  filenameOrRegexChanges.map((c) => {
+                  finderChanges.map((c) => {
                     const orig = trackById.get(c.trackId);
+                    const hasCollision = Boolean(
+                      c.patch.newFilePath &&
+                        finderCollisionPaths.has(c.patch.newFilePath.toLowerCase())
+                    );
+                    const newFileName = c.patch.newFilePath
+                      ? c.patch.newFilePath.split(/[/\\]/).pop()
+                      : undefined;
+                    const beforeDisplay =
+                      finderRule.mode === "template" &&
+                      finderRule.templateDirection === "extract_from_filename"
+                        ? orig?.fileName
+                        : finderRule.targetField === "fileName" ||
+                          c.patch.newFilePath
+                        ? orig?.fileName
+                        : finderRule.targetField === "trackNumber"
+                        ? orig?.trackNumber != null
+                          ? String(orig.trackNumber)
+                          : "（空）"
+                        : String(orig?.[finderRule.targetField] || "（空）");
+
                     return (
                       <tr key={c.trackId}>
-                        <td className="mono">{orig?.fileName}</td>
-                        <td className="diff-new">
-                          {c.patch.trackNumber !== undefined && `#${c.patch.trackNumber} · `}
-                          {c.patch.artist && `歌手: ${c.patch.artist} · `}
-                          {c.patch.title && `标题: ${c.patch.title} · `}
-                          {c.patch.album && `专辑: ${c.patch.album}`}
+                        <td className="mono diff-old">{beforeDisplay}</td>
+                        <td className="mono diff-new">
+                          {newFileName && <span>{newFileName}</span>}
+                          {c.patch.trackNumber !== undefined && (
+                            <span>#{String(c.patch.trackNumber).padStart(2, "0")} </span>
+                          )}
+                          {c.patch.title !== undefined && <span>标题: {c.patch.title} </span>}
+                          {c.patch.artist !== undefined && <span>歌手: {c.patch.artist} </span>}
+                          {c.patch.albumArtist !== undefined && (
+                            <span>专辑歌手: {c.patch.albumArtist} </span>
+                          )}
+                          {c.patch.album !== undefined && <span>专辑: {c.patch.album} </span>}
+                          {c.patch.year !== undefined && <span>年份: {c.patch.year} </span>}
+                          {c.patch.genre !== undefined && <span>流派: {c.patch.genre} </span>}
+                          {c.patch.comment !== undefined && <span>备注: {c.patch.comment}</span>}
+                        </td>
+                        <td>
+                          {hasCollision ? (
+                            <span className="diff-conflict">文件名冲突</span>
+                          ) : (
+                            <span style={{ color: "var(--staged)" }}>待暂存</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -661,7 +1092,10 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
           </div>
           <div className="dialog-foot">
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
-              命中 {filenameOrRegexChanges.length} 首音轨
+              命中 {finderChanges.length} 首音轨
+              {finderCollisionPaths.size > 0
+                ? " · 存在重名冲突，请调整序号或规则"
+                : ""}
             </span>
             <div style={{ display: "flex", gap: "8px" }}>
               <button type="button" className="tool-btn" onClick={requestClose}>
@@ -670,13 +1104,15 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
               <button
                 type="button"
                 className="tool-btn primary-commit"
-                disabled={filenameOrRegexChanges.length === 0}
+                disabled={
+                  finderChanges.length === 0 || finderCollisionPaths.size > 0
+                }
                 onClick={() => {
-                  onStageChanges(filenameOrRegexChanges);
+                  onStageChanges(finderChanges);
                   requestClose();
                 }}
               >
-                暂存批量更改
+                暂存批量更改 ({finderChanges.length})
               </button>
             </div>
           </div>

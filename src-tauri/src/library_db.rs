@@ -387,17 +387,23 @@ impl LibraryDb {
         Ok(summary)
     }
 
-    pub fn upsert_library_root(&self, path: &str, label: &str) -> Result<LibraryRoot, String> {
+    /// `label` 传 None 时:新行回退为目录名,已存在行保留原 label(防重扫刷掉自定义名)。
+    pub fn upsert_library_root(&self, path: &str, label: Option<&str>) -> Result<LibraryRoot, String> {
         let norm_path = normalize_root_path(path);
+        let fallback_label = Path::new(&norm_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&norm_path);
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO library_roots (path, label, added_at, last_scan)
-             VALUES (?1, ?2, ?3, ?3)
+             VALUES (?1, COALESCE(?2, ?3), ?4, ?4)
              ON CONFLICT(path) DO UPDATE SET
-               label = excluded.label,
+               label = COALESCE(?2, library_roots.label),
                last_scan = excluded.last_scan",
-            params![norm_path, label, now],
+            params![norm_path, label, fallback_label, now],
         )
         .map_err(|e| e.to_string())?;
 
@@ -486,6 +492,30 @@ impl LibraryDb {
         tx.commit().map_err(|e| e.to_string())
     }
 
+    /// 增量重扫用:返回目录前缀下已索引文件的 file_path → (file_size, mtime_ms)。
+    pub fn track_stats_under(&self, dir_path: &str) -> Result<std::collections::HashMap<String, (u64, i64)>, String> {
+        let norm = normalize_root_path(dir_path);
+        let prefix = dir_prefix(&norm);
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT file_path, file_size, mtime_ms FROM tracks WHERE substr(file_path, 1, length(?1)) = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![prefix], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (k, v) = row.map_err(|e| e.to_string())?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+
     pub fn get_track_paths(&self, track_ids: &[String]) -> Result<Vec<String>, String> {
         if track_ids.is_empty() {
             return Ok(Vec::new());
@@ -541,6 +571,94 @@ fn dir_prefix(norm_path: &str) -> String {
         "/".to_string()
     } else {
         format!("{norm_path}/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_temp_db() -> (tempfile::TempDir, LibraryDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = LibraryDb::open(&dir.path().join("lib.sqlite")).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn rescan_style_upsert_preserves_custom_label() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_library_root("/Volumes/m", Some("我的曲库")).unwrap();
+        // 模拟重扫:不传 label → 不应刷回目录名
+        db.upsert_library_root("/Volumes/m", None).unwrap();
+        let roots = db.list_library_roots().unwrap();
+        assert_eq!(roots[0].label, "我的曲库");
+    }
+
+    #[test]
+    fn new_root_without_label_falls_back_to_dirname() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_library_root("/Users/me/FLAC无损", None).unwrap();
+        let roots = db.list_library_roots().unwrap();
+        assert_eq!(roots[0].label, "FLAC无损");
+    }
+
+    fn fake_track(id: &str, file_path: &str, file_size: u64, mtime_ms: i64) -> TrackRecord {
+        TrackRecord {
+            id: id.to_string(),
+            workspace_mode: "library".to_string(),
+            file_path: file_path.to_string(),
+            file_name: "x.flac".to_string(),
+            extension: "flac".to_string(),
+            file_size,
+            mtime_ms,
+            title: String::new(),
+            artist: String::new(),
+            album_artist: String::new(),
+            album: String::new(),
+            year: String::new(),
+            genre: String::new(),
+            track_number: None,
+            total_tracks: None,
+            disc_number: None,
+            total_discs: None,
+            comment: String::new(),
+            lyrics: String::new(),
+            has_external_lrc: false,
+            artist_sort: String::new(),
+            album_sort: String::new(),
+            pinyin_initial: "#".to_string(),
+            specs: crate::models::AudioSpecs {
+                codec: "FLAC".to_string(),
+                sample_rate: 44100,
+                bit_depth: 16,
+                channels: 2,
+                bitrate_kbps: 0,
+                duration_ms: 0,
+                stream_md5: String::new(),
+                md5_verified: "unknown".to_string(),
+            },
+            cover_hash: None,
+            cover_width: 0,
+            cover_height: 0,
+            cover_bytes: 0,
+            cover_data_url: None,
+            diag_flags: vec![],
+        }
+    }
+
+    #[test]
+    fn track_stats_under_returns_size_mtime_index() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_tracks(&[
+            fake_track("t1", "/root/a.flac", 100, 1000),
+            fake_track("t2", "/root/sub/b.flac", 200, 2000),
+            fake_track("t3", "/other/c.flac", 300, 3000),
+        ])
+        .unwrap();
+        let stats = db.track_stats_under("/root").unwrap();
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats.get("/root/a.flac"), Some(&(100, 1000)));
+        assert_eq!(stats.get("/root/sub/b.flac"), Some(&(200, 2000)));
     }
 }
 

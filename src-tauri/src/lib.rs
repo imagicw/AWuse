@@ -5,8 +5,10 @@ pub mod models;
 pub mod organizer;
 pub mod scraper;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use chrono::Utc;
 use rayon::prelude::*;
@@ -63,21 +65,35 @@ async fn scan_directory(
         .filter(|p| p.is_file() && is_supported_audio(p))
         .collect();
 
+    // 增量重扫:size + mtime 未变的已索引文件跳过重解析。
+    let existing = state.db.track_stats_under(&dir_path).unwrap_or_default();
+    let candidates: Vec<(PathBuf, u64, i64)> = paths
+        .iter()
+        .filter_map(|p| {
+            std::fs::metadata(p).ok().map(|m| {
+                let mtime_ms = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                (p.clone(), m.len(), mtime_ms)
+            })
+        })
+        .collect();
+    let stale = paths_needing_scan(&candidates, &existing);
+
     let cache_dir = state.cover_cache_dir.clone();
     let mode = workspace_mode.clone();
 
-    let mut tracks: Vec<TrackRecord> = paths
+    let mut tracks: Vec<TrackRecord> = stale
         .par_iter()
         .filter_map(|p| read_track_metadata(p, &mode, Some(&cache_dir)).ok())
         .collect();
 
     state.db.upsert_tracks(&tracks)?;
-    let label = Path::new(&dir_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&dir_path);
-    state.db.upsert_library_root(&dir_path, label)?;
+    // label 传 None:新根取目录名,已有根保留(可能用户自定义过的)label。
+    state.db.upsert_library_root(&dir_path, None)?;
     attach_cached_covers(&mut tracks, &state.cover_cache_dir);
     Ok(tracks)
 }
@@ -316,6 +332,53 @@ async fn search_online_releases(
     query: String,
 ) -> Result<Vec<OnlineSearchResult>, String> {
     search_online_metadata(&source, &query).await
+}
+
+/// 从 WalkDir 候选中筛出需要重新解析的文件:未入库的新文件,或 size/mtime 已变化的文件。
+fn paths_needing_scan(
+    candidates: &[(PathBuf, u64, i64)],
+    existing: &HashMap<String, (u64, i64)>,
+) -> Vec<PathBuf> {
+    candidates
+        .iter()
+        .filter(|(p, size, mtime)| {
+            let key = p.to_string_lossy();
+            match existing.get(key.as_ref()) {
+                Some((s, m)) => *s != *size || *m != *mtime,
+                None => true,
+            }
+        })
+        .map(|(p, _, _)| p.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_filter_keeps_new_and_changed_only() {
+        let existing: HashMap<String, (u64, i64)> = [
+            ("/r/a.flac".to_string(), (100, 1000)),
+            ("/r/b.flac".to_string(), (200, 2000)),
+            ("/r/d.flac".to_string(), (300, 3000)),
+        ]
+        .into_iter()
+        .collect();
+
+        let candidates = vec![
+            (PathBuf::from("/r/a.flac"), 100u64, 1000i64), // size+mtime 相同 → 跳过
+            (PathBuf::from("/r/b.flac"), 201, 2000),       // size 变了 → 重扫
+            (PathBuf::from("/r/c.flac"), 50, 500),         // 新文件 → 扫描
+            (PathBuf::from("/r/d.flac"), 300, 3100),       // 仅 mtime 变 → 重扫
+        ];
+
+        let stale = paths_needing_scan(&candidates, &existing);
+        assert_eq!(
+            stale,
+            vec![PathBuf::from("/r/b.flac"), PathBuf::from("/r/c.flac"), PathBuf::from("/r/d.flac")]
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

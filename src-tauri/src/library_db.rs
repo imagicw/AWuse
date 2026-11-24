@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{DiagnosticSummary, LibraryRoot, TrackRecord, TransactionItem, TransactionRecord};
 
@@ -26,7 +26,9 @@ impl LibraryDb {
                 path        TEXT NOT NULL UNIQUE,
                 label       TEXT NOT NULL,
                 added_at    TEXT NOT NULL,
-                last_scan   TEXT
+                last_scan   TEXT,
+                source_uri  TEXT,
+                is_network  INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS covers (
@@ -112,6 +114,17 @@ impl LibraryDb {
             ",
         )
         .map_err(|e| format!("Schema init error: {e}"))?;
+
+        // 旧库迁移:CREATE TABLE IF NOT EXISTS 不会给已有表补列,逐列检查 ALTER。
+        for (col, ddl) in [
+            ("source_uri", "ALTER TABLE library_roots ADD COLUMN source_uri TEXT"),
+            (
+                "is_network",
+                "ALTER TABLE library_roots ADD COLUMN is_network INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            ensure_column(&conn, "library_roots", col, ddl)?;
+        }
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -387,17 +400,38 @@ impl LibraryDb {
         Ok(summary)
     }
 
-    pub fn upsert_library_root(&self, path: &str, label: &str) -> Result<LibraryRoot, String> {
+    /// `label` 传 None 时:新行回退为目录名,已存在行保留原 label(防重扫刷掉自定义名)。
+    pub fn upsert_library_root(
+        &self,
+        path: &str,
+        label: Option<&str>,
+        source_uri: Option<&str>,
+        is_network: bool,
+    ) -> Result<LibraryRoot, String> {
         let norm_path = normalize_root_path(path);
+        let fallback_label = Path::new(&norm_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&norm_path);
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO library_roots (path, label, added_at, last_scan)
-             VALUES (?1, ?2, ?3, ?3)
+            "INSERT INTO library_roots (path, label, added_at, last_scan, source_uri, is_network)
+             VALUES (?1, COALESCE(?2, ?3), ?4, ?4, ?5, ?6)
              ON CONFLICT(path) DO UPDATE SET
-               label = excluded.label,
-               last_scan = excluded.last_scan",
-            params![norm_path, label, now],
+               label = COALESCE(?2, library_roots.label),
+               last_scan = excluded.last_scan,
+               source_uri = COALESCE(?5, library_roots.source_uri),
+               is_network = MAX(?6, library_roots.is_network)",
+            params![
+                norm_path,
+                label,
+                fallback_label,
+                now,
+                source_uri,
+                if is_network { 1 } else { 0 }
+            ],
         )
         .map_err(|e| e.to_string())?;
 
@@ -411,18 +445,9 @@ impl LibraryDb {
             .unwrap_or(0);
 
         conn.query_row(
-            "SELECT id, path, label, added_at, last_scan FROM library_roots WHERE path = ?1",
+            "SELECT id, path, label, added_at, last_scan, source_uri, is_network FROM library_roots WHERE path = ?1",
             params![norm_path],
-            |row| {
-                Ok(LibraryRoot {
-                    id: row.get(0)?,
-                    path: row.get(1)?,
-                    label: row.get(2)?,
-                    added_at: row.get(3)?,
-                    last_scan: row.get(4)?,
-                    track_count: count as usize,
-                })
-            },
+            |row| map_root_row(row, count as usize),
         )
         .map_err(|e| e.to_string())
     }
@@ -430,19 +455,10 @@ impl LibraryDb {
     pub fn list_library_roots(&self) -> Result<Vec<LibraryRoot>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, path, label, added_at, last_scan FROM library_roots ORDER BY id ASC")
+            .prepare("SELECT id, path, label, added_at, last_scan, source_uri, is_network FROM library_roots ORDER BY id ASC")
             .map_err(|e| e.to_string())?;
         let mut roots = stmt
-            .query_map([], |row| {
-                Ok(LibraryRoot {
-                    id: row.get(0)?,
-                    path: row.get(1)?,
-                    label: row.get(2)?,
-                    added_at: row.get(3)?,
-                    last_scan: row.get(4)?,
-                    track_count: 0,
-                })
-            })
+            .query_map([], |row| map_root_row(row, 0))
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -459,6 +475,19 @@ impl LibraryDb {
             r.track_count = count as usize;
         }
         Ok(roots)
+    }
+
+    pub fn find_library_root(&self, path: &str) -> Result<Option<LibraryRoot>, String> {
+        let norm = normalize_root_path(path);
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id, path, label, added_at, last_scan, source_uri, is_network
+             FROM library_roots WHERE path = ?1",
+            params![norm],
+            |r| map_root_row(r, 0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     pub fn remove_library_root(&self, path: &str) -> Result<(), String> {
@@ -484,6 +513,30 @@ impl LibraryDb {
         .map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// 增量重扫用:返回目录前缀下已索引文件的 file_path → (file_size, mtime_ms)。
+    pub fn track_stats_under(&self, dir_path: &str) -> Result<std::collections::HashMap<String, (u64, i64)>, String> {
+        let norm = normalize_root_path(dir_path);
+        let prefix = dir_prefix(&norm);
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT file_path, file_size, mtime_ms FROM tracks WHERE substr(file_path, 1, length(?1)) = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![prefix], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (k, v) = row.map_err(|e| e.to_string())?;
+            out.insert(k, v);
+        }
+        Ok(out)
     }
 
     pub fn get_track_paths(&self, track_ids: &[String]) -> Result<Vec<String>, String> {
@@ -527,6 +580,40 @@ impl LibraryDb {
     }
 }
 
+fn map_root_row(row: &rusqlite::Row<'_>, track_count: usize) -> rusqlite::Result<LibraryRoot> {
+    Ok(LibraryRoot {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        label: row.get(2)?,
+        added_at: row.get(3)?,
+        last_scan: row.get(4)?,
+        source_uri: row.get(5)?,
+        is_network: row.get::<_, i64>(6)? != 0,
+        track_count,
+        is_offline: false,
+    })
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| e.to_string())?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if !cols.iter().any(|c| c == column) {
+        conn.execute_batch(ddl).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn normalize_root_path(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed == "/" {
@@ -541,6 +628,165 @@ fn dir_prefix(norm_path: &str) -> String {
         "/".to_string()
     } else {
         format!("{norm_path}/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn open_temp_db() -> (tempfile::TempDir, LibraryDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = LibraryDb::open(&dir.path().join("lib.sqlite")).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn network_root_fields_roundtrip() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_library_root(
+            "/Volumes/music/flac",
+            Some("NAS FLAC"),
+            Some("smb://nas.local/music/flac"),
+            true,
+        )
+        .unwrap();
+        db.upsert_library_root("/Users/me/Music", Some("本地"), None, false)
+            .unwrap();
+
+        let roots = db.list_library_roots().unwrap();
+        let net = roots.iter().find(|r| r.path == "/Volumes/music/flac").unwrap();
+        assert_eq!(net.source_uri.as_deref(), Some("smb://nas.local/music/flac"));
+        assert!(net.is_network);
+        let local = roots.iter().find(|r| r.path == "/Users/me/Music").unwrap();
+        assert_eq!(local.source_uri, None);
+        assert!(!local.is_network);
+    }
+
+    #[test]
+    fn upsert_root_updates_source_on_conflict() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_library_root("/Volumes/m", Some("v1"), Some("smb://a/b"), true)
+            .unwrap();
+        db.upsert_library_root("/Volumes/m", Some("v2"), Some("smb://a/c"), true)
+            .unwrap();
+        let roots = db.list_library_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].label, "v2");
+        assert_eq!(roots[0].source_uri.as_deref(), Some("smb://a/c"));
+    }
+
+    #[test]
+    fn rescan_style_upsert_preserves_custom_label() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_library_root("/Volumes/m", Some("NAS 自定义名"), Some("smb://a/b"), true)
+            .unwrap();
+        // 模拟重扫:不传 label → 不应刷回目录名
+        db.upsert_library_root("/Volumes/m", None, None, false).unwrap();
+        let roots = db.list_library_roots().unwrap();
+        assert_eq!(roots[0].label, "NAS 自定义名");
+        assert_eq!(roots[0].source_uri.as_deref(), Some("smb://a/b"));
+        assert!(roots[0].is_network);
+    }
+
+    #[test]
+    fn new_root_without_label_falls_back_to_dirname() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_library_root("/Users/me/FLAC无损", None, None, false)
+            .unwrap();
+        let roots = db.list_library_roots().unwrap();
+        assert_eq!(roots[0].label, "FLAC无损");
+    }
+
+    fn fake_track(id: &str, file_path: &str, file_size: u64, mtime_ms: i64) -> TrackRecord {
+        TrackRecord {
+            id: id.to_string(),
+            workspace_mode: "library".to_string(),
+            file_path: file_path.to_string(),
+            file_name: "x.flac".to_string(),
+            extension: "flac".to_string(),
+            file_size,
+            mtime_ms,
+            title: String::new(),
+            artist: String::new(),
+            album_artist: String::new(),
+            album: String::new(),
+            year: String::new(),
+            genre: String::new(),
+            track_number: None,
+            total_tracks: None,
+            disc_number: None,
+            total_discs: None,
+            comment: String::new(),
+            lyrics: String::new(),
+            has_external_lrc: false,
+            artist_sort: String::new(),
+            album_sort: String::new(),
+            pinyin_initial: "#".to_string(),
+            specs: crate::models::AudioSpecs {
+                codec: "FLAC".to_string(),
+                sample_rate: 44100,
+                bit_depth: 16,
+                channels: 2,
+                bitrate_kbps: 0,
+                duration_ms: 0,
+                stream_md5: String::new(),
+                md5_verified: "unknown".to_string(),
+            },
+            cover_hash: None,
+            cover_width: 0,
+            cover_height: 0,
+            cover_bytes: 0,
+            cover_data_url: None,
+            diag_flags: vec![],
+        }
+    }
+
+    #[test]
+    fn track_stats_under_returns_size_mtime_index() {
+        let (_dir, db) = open_temp_db();
+        db.upsert_tracks(&[
+            fake_track("t1", "/root/a.flac", 100, 1000),
+            fake_track("t2", "/root/sub/b.flac", 200, 2000),
+            fake_track("t3", "/other/c.flac", 300, 3000),
+        ])
+        .unwrap();
+        let stats = db.track_stats_under("/root").unwrap();
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats.get("/root/a.flac"), Some(&(100, 1000)));
+        assert_eq!(stats.get("/root/sub/b.flac"), Some(&(200, 2000)));
+    }
+
+    #[test]
+    fn migrates_legacy_library_roots_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.sqlite");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE library_roots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    label TEXT NOT NULL,
+                    added_at TEXT NOT NULL,
+                    last_scan TEXT
+                );
+                INSERT INTO library_roots (path, label, added_at)
+                VALUES ('/old/root', '旧目录', '2024-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let db = LibraryDb::open(&db_path).unwrap();
+        let roots = db.list_library_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].source_uri, None);
+        assert!(!roots[0].is_network);
+
+        db.upsert_library_root("/new/net", Some("n"), Some("smb://h/s"), true)
+            .unwrap();
+        let roots = db.list_library_roots().unwrap();
+        assert_eq!(roots.len(), 2);
     }
 }
 

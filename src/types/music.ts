@@ -74,6 +74,8 @@ export interface TrackRecord {
   coverAccentHex?: string;
 
   diagFlags: string[];
+  /** 曲目所属网络根当前离线:置灰展示、不可播放、不可编辑 */
+  isOffline?: boolean;
   /** Optional local ObjectURL for real dropped audio files so WebAudio/HTMLAudio can play them */
   objectUrl?: string;
 }
@@ -177,6 +179,9 @@ export interface LibraryRoot {
   addedAt: string;
   lastScan: string | null;
   trackCount: number;
+  sourceUri: string | null;
+  isNetwork: boolean;
+  isOffline: boolean;
 }
 
 export type FinderRuleTarget =

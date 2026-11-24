@@ -682,6 +682,22 @@ body,
   font-weight: 600;
 }
 
+.dir-root-item.offline .dir-root-main {
+  color: var(--text-tertiary);
+  opacity: 0.6;
+}
+
+.root-offline-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-strong);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
 .dir-root-actions {
   display: flex;
   align-items: center;
@@ -1318,6 +1334,11 @@ body,
 
 .pro-table tbody tr {
   cursor: default;
+}
+
+.pro-table tbody tr.offline td {
+  color: var(--text-tertiary);
+  opacity: 0.55;
 }
 
 .pro-table tbody tr:hover td {

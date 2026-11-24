@@ -53,7 +53,7 @@ flowchart TB
 ## 2. 双工作区模式与 SQLite FTS5 数据库 Schema
 
 AWusicMeta 区分两种互补工作流：
-1. **持久媒体库模式 (Media Library Mode)**：挂载本地常驻曲库根目录，通过 `rayon` 并行扫描后建立 SQLite WAL + FTS5 索引库，支持千级/万级曲库秒级过滤、拼音 `A-Z` 快速跳转与智能体检诊断。
+1. **持久媒体库模式 (Media Library Mode)**：挂载本地常驻曲库根目录或 SMB 网络共享(Network Root，经 OS 挂载，详见 `docs/adr/0001`)，通过 `rayon` 并行扫描后建立 SQLite WAL + FTS5 索引库，支持千级/万级曲库秒级过滤、拼音 `A-Z` 快速跳转与智能体检诊断。网络根重扫为增量扫描（size+mtime 未变跳过）；挂载点不可达且重挂失败时进入 Offline Root 语义：索引保留、曲目置灰、禁播禁编辑。
 2. **临时工作区模式 (Staging Workspace)**：拖拽外部下载目录（如刚解压的专辑包）进入临时沙盒，完成标签清洗、封面配对、散碎专辑归并后，通过目录重整引擎一键归档入库。
 
 ### 2.1 SQLite DDL Schema
@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS library_roots (
     path        TEXT NOT NULL UNIQUE,
     label       TEXT NOT NULL,
     added_at    TEXT NOT NULL,
-    last_scan   TEXT
+    last_scan   TEXT,
+    source_uri  TEXT,                    -- Network Root 的远端地址(smb://…),本地根为 NULL
+    is_network  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS covers (

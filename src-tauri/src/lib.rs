@@ -2,14 +2,11 @@ pub mod audio_engine;
 pub mod batch_tools;
 pub mod library_db;
 pub mod models;
-pub mod net_mount;
 pub mod organizer;
 pub mod scraper;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use chrono::Utc;
 use rayon::prelude::*;
@@ -24,11 +21,8 @@ use crate::batch_tools::{
 };
 use crate::library_db::LibraryDb;
 use crate::models::{
-    DiagnosticSummary, LibraryRoot, NetworkMountResult, OnlineSearchResult, ReorganizePreviewItem,
-    ReorganizeRule, StagedChange, TagPatch, TrackRecord, TransactionItem, TransactionRecord,
-};
-use crate::net_mount::{
-    ensure_root_accessible, parse_network_source, wait_for_mount_point, Mounter, OsMounter,
+    DiagnosticSummary, LibraryRoot, OnlineSearchResult, ReorganizePreviewItem, ReorganizeRule,
+    StagedChange, TagPatch, TrackRecord, TransactionItem, TransactionRecord,
 };
 use crate::organizer::{execute_move_with_companions, preview_reorganize};
 use crate::scraper::search_online_metadata;
@@ -61,28 +55,6 @@ async fn scan_directory(
     dir_path: String,
     workspace_mode: String,
 ) -> Result<Vec<TrackRecord>, String> {
-    // 挂载点缺失时:网络根尝试按 source_uri 重挂,本地根直接报不可达。
-    if !Path::new(&dir_path).exists() {
-        match state.db.find_library_root(&dir_path)? {
-            Some(root) if root.is_network => {
-                let root_path = root.path.clone();
-                let uri = root.source_uri.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    ensure_root_accessible(
-                        &root_path,
-                        uri.as_deref(),
-                        true,
-                        &OsMounter,
-                        std::time::Duration::from_secs(15),
-                    )
-                })
-                .await
-                .map_err(|e| format!("重挂线程异常: {e}"))??;
-            }
-            _ => return Err(format!("目录不可达: {dir_path}")),
-        }
-    }
-
     let paths: Vec<PathBuf> = WalkDir::new(&dir_path)
         .follow_links(true)
         .into_iter()
@@ -91,35 +63,21 @@ async fn scan_directory(
         .filter(|p| p.is_file() && is_supported_audio(p))
         .collect();
 
-    // 增量重扫:size + mtime 未变的已索引文件跳过重解析(网络根上尤为关键)。
-    let existing = state.db.track_stats_under(&dir_path).unwrap_or_default();
-    let candidates: Vec<(PathBuf, u64, i64)> = paths
-        .iter()
-        .filter_map(|p| {
-            std::fs::metadata(p).ok().map(|m| {
-                let mtime_ms = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                (p.clone(), m.len(), mtime_ms)
-            })
-        })
-        .collect();
-    let stale = paths_needing_scan(&candidates, &existing);
-
     let cache_dir = state.cover_cache_dir.clone();
     let mode = workspace_mode.clone();
 
-    let mut tracks: Vec<TrackRecord> = stale
+    let mut tracks: Vec<TrackRecord> = paths
         .par_iter()
         .filter_map(|p| read_track_metadata(p, &mode, Some(&cache_dir)).ok())
         .collect();
 
     state.db.upsert_tracks(&tracks)?;
-    // label 传 None:新根取目录名,已有根保留(可能用户自定义过的)label。
-    state.db.upsert_library_root(&dir_path, None, None, false)?;
+    let label = Path::new(&dir_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&dir_path);
+    state.db.upsert_library_root(&dir_path, label)?;
     attach_cached_covers(&mut tracks, &state.cover_cache_dir);
     Ok(tracks)
 }
@@ -157,59 +115,7 @@ async fn pick_directory_dialog(app: AppHandle) -> Result<Option<String>, String>
 
 #[tauri::command]
 async fn list_library_roots(state: State<'_, AppState>) -> Result<Vec<LibraryRoot>, String> {
-    let mut roots = state.db.list_library_roots()?;
-    for root in &mut roots {
-        root.is_offline = root.is_network && !Path::new(&root.path).exists();
-    }
-    Ok(roots)
-}
-
-/// 添加网络共享:OS 挂载 smb://…/share → 挂点 + 子路径合成扫描根 → 走既有 scan_directory。
-/// 网络根是持久的媒体库对象,始终以 "library" 模式扫描。
-#[tauri::command]
-async fn mount_network_share(
-    state: State<'_, AppState>,
-    source_uri: String,
-    label: Option<String>,
-) -> Result<NetworkMountResult, String> {
-    let source = parse_network_source(&source_uri)?;
-    let uri_for_err = source_uri.clone();
-    let src = source.clone();
-
-    // 已挂载则零等待命中;否则触发系统挂载并轮询挂载点出现(授权弹窗可能耗时,给足 60s)。
-    let mount_point = tauri::async_runtime::spawn_blocking(move || {
-        if let Some(p) = wait_for_mount_point(&src, std::time::Duration::ZERO) {
-            return Ok(p);
-        }
-        OsMounter.mount(&src.mount_uri())?;
-        wait_for_mount_point(&src, std::time::Duration::from_secs(60))
-            .ok_or_else(|| format!("挂载 {uri_for_err} 后未检测到挂载点"))
-    })
-    .await
-    .map_err(|e| format!("挂载线程异常: {e}"))??;
-
-    let scan_path = if source.sub_path.is_empty() {
-        mount_point
-    } else {
-        mount_point.join(&source.sub_path)
-    };
-    if !scan_path.exists() {
-        return Err(format!(
-            "共享内路径不存在: {} (来自 {source_uri})",
-            scan_path.display()
-        ));
-    }
-    let root_path = scan_path.to_string_lossy().to_string();
-
-    let tracks = scan_directory(state.clone(), root_path.clone(), "library".to_string()).await?;
-    let label = label
-        .filter(|l| !l.trim().is_empty())
-        .unwrap_or_else(|| source.share.clone());
-    state
-        .db
-        .upsert_library_root(&root_path, Some(&label), Some(source_uri.trim()), true)?;
-
-    Ok(NetworkMountResult { root_path, tracks })
+    state.db.list_library_roots()
 }
 
 #[tauri::command]
@@ -412,54 +318,6 @@ async fn search_online_releases(
     search_online_metadata(&source, &query).await
 }
 
-/// 从 WalkDir 候选中筛出需要重新解析的文件:未入库的新文件,或 size/mtime 已变化的文件。
-fn paths_needing_scan(
-    candidates: &[(PathBuf, u64, i64)],
-    existing: &HashMap<String, (u64, i64)>,
-) -> Vec<PathBuf> {
-    candidates
-        .iter()
-        .filter(|(p, size, mtime)| {
-            let key = p.to_string_lossy();
-            match existing.get(key.as_ref()) {
-                Some((s, m)) => *s != *size || *m != *mtime,
-                None => true,
-            }
-        })
-        .map(|(p, _, _)| p.clone())
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn incremental_filter_keeps_new_and_changed_only() {
-        let existing: HashMap<String, (u64, i64)> = [
-            ("/r/a.flac".to_string(), (100, 1000)),
-            ("/r/b.flac".to_string(), (200, 2000)),
-            ("/r/d.flac".to_string(), (300, 3000)),
-        ]
-        .into_iter()
-        .collect();
-
-        let candidates = vec![
-            (PathBuf::from("/r/a.flac"), 100u64, 1000i64), // size+mtime 相同 → 跳过
-            (PathBuf::from("/r/b.flac"), 201, 2000),       // size 变了 → 重扫
-            (PathBuf::from("/r/c.flac"), 50, 500),         // 新文件 → 扫描
-            (PathBuf::from("/r/d.flac"), 300, 3100),       // 仅 mtime 变 → 重扫
-        ];
-
-        let stale = paths_needing_scan(&candidates, &existing);
-        assert_eq!(
-            stale,
-            vec![PathBuf::from("/r/b.flac"), PathBuf::from("/r/c.flac"), PathBuf::from("/r/d.flac")]
-        );
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -486,7 +344,6 @@ pub fn run() {
             query_tracks,
             pick_directory_dialog,
             list_library_roots,
-            mount_network_share,
             remove_library_root,
             delete_tracks_cmd,
             get_diagnostics,

@@ -18,7 +18,6 @@ import {
   bridgePickDirectory,
   bridgeQueryTracks,
   bridgeRemoveLibraryRoot,
-  bridgeMountNetworkShare,
   bridgeScanDirectory,
   bridgeVerifyFlacMd5,
   computeDiagnosticsFromTracks,
@@ -215,21 +214,6 @@ export const App: React.FC = () => {
     });
   }, [libraryRoots, libraryTracks, stagingTracks]);
 
-  // 离线网络根的路径前缀;其下曲目置灰、不可播放、不可编辑
-  const offlinePrefixes = useMemo(
-    () =>
-      displayRoots
-        .filter((r) => r.isOffline)
-        .map((r) => normalizePathPrefix(r.path)),
-    [displayRoots]
-  );
-
-  const isTrackOffline = useCallback(
-    (t: TrackRecord) =>
-      offlinePrefixes.some((p) => t.filePath.startsWith(p)),
-    [offlinePrefixes]
-  );
-
   const handleChangeScope = (nextScope: SidebarScope) => {
     setScope(nextScope);
     if (nextScope === "albums") setViewMode("gallery");
@@ -311,15 +295,6 @@ export const App: React.FC = () => {
     });
   }, [activeTracks, activeRootPath, scope, pinyinFilter, searchQuery]);
 
-  // 供视图渲染的离线标记(不影响真实数据)
-  const displayTracks = useMemo(
-    () =>
-      filteredTracks.map((t) =>
-        isTrackOffline(t) ? { ...t, isOffline: true } : t
-      ),
-    [filteredTracks, isTrackOffline]
-  );
-
   const selectedTracks = useMemo(
     () => activeTracks.filter((t) => selectedIds.has(t.id)),
     [activeTracks, selectedIds]
@@ -335,15 +310,6 @@ export const App: React.FC = () => {
 
   const stageChanges = useCallback(
     (changes: StagedChange[]) => {
-      if (changes.length === 0) return;
-      const offlineIds = new Set(
-        activeTracks.filter(isTrackOffline).map((t) => t.id)
-      );
-      const blocked = changes.filter((c) => offlineIds.has(c.trackId)).length;
-      if (blocked > 0) {
-        changes = changes.filter((c) => !offlineIds.has(c.trackId));
-        showStatus(`已跳过离线根内的 ${blocked} 首(不可编辑)`);
-      }
       if (changes.length === 0) return;
       setStagedMap((prev) => {
         const next = new Map(prev);
@@ -363,7 +329,7 @@ export const App: React.FC = () => {
       });
       showStatus(`已暂存 ${changes.length} 项变更预览（按 ⌘S 写入落盘）`);
     },
-    [activeTracks, isTrackOffline, showStatus]
+    [showStatus]
   );
 
   const handleStageFieldEdit = useCallback(
@@ -380,30 +346,9 @@ export const App: React.FC = () => {
     [stageChanges]
   );
 
-  const handlePlayTrack = useCallback(
-    (t: TrackRecord) => {
-      if (isTrackOffline(t)) {
-        showStatus("网络根当前离线,无法试听");
-        return;
-      }
-      setPlayingTrackId(t.id);
-      setIsPlaying(true);
-    },
-    [isTrackOffline, showStatus]
-  );
-
   const handleCommitStaged = useCallback(async () => {
     if (stagedMap.size === 0) return;
-    const offlineIds = new Set(
-      activeTracks.filter(isTrackOffline).map((t) => t.id)
-    );
-    let changes = Array.from(stagedMap.values());
-    const blocked = changes.filter((c) => offlineIds.has(c.trackId)).length;
-    if (blocked > 0) {
-      changes = changes.filter((c) => !offlineIds.has(c.trackId));
-      showStatus(`已跳过离线根内的 ${blocked} 首(不可编辑)`);
-      if (changes.length === 0) return;
-    }
+    const changes = Array.from(stagedMap.values());
     const summary =
       changes.length === 1
         ? changes[0].reason
@@ -423,7 +368,7 @@ export const App: React.FC = () => {
       setLibraryRoots(roots);
     }
     showStatus(`已原子写入 ${transaction.itemCount} 首音轨变更并记录回滚快照`);
-  }, [stagedMap, activeTracks, isTrackOffline, setActiveTracks, showStatus]);
+  }, [stagedMap, activeTracks, setActiveTracks, showStatus]);
 
   const handleRevertTransaction = useCallback(
     (txId: string) => {
@@ -665,31 +610,6 @@ export const App: React.FC = () => {
     }
   }, [handleScanDirectoryPath, showStatus]);
 
-  const handleAddNetworkShare = useCallback(
-    async (sourceUri: string, label: string | null) => {
-      showStatus(`正在挂载网络共享 ${sourceUri}…`);
-      try {
-        const result = await bridgeMountNetworkShare(sourceUri, label);
-        // 网络根恒属媒体库:刷新 library 数据
-        const [refreshedTracks, roots] = await Promise.all([
-          bridgeQueryTracks("library"),
-          bridgeListLibraryRoots(),
-        ]);
-        setLibraryRoots(roots);
-        setLibraryTracks(refreshedTracks);
-        if (workspaceMode === "library") {
-          setActiveRootPath(result.rootPath);
-        }
-        showStatus(
-          `网络共享已挂载: 新增/更新 ${result.tracks.length} 首音轨`
-        );
-      } catch (err) {
-        showStatus(`挂载网络共享失败: ${String(err)}`);
-      }
-    },
-    [workspaceMode, showStatus]
-  );
-
   const handleRemoveRoot = useCallback(
     async (dirPath: string) => {
       await bridgeRemoveLibraryRoot(dirPath);
@@ -818,7 +738,6 @@ export const App: React.FC = () => {
           onSelectRootPath={setActiveRootPath}
           onAddDirectoryRequest={handleAddDirectoryRequest}
           onAddDirectoryByPath={handleScanDirectoryPath}
-          onAddNetworkShare={handleAddNetworkShare}
           onRescanRoot={handleScanDirectoryPath}
           onRemoveRoot={handleRemoveRoot}
           onImportFiles={(files) => handleImportFiles(files, false)}
@@ -997,11 +916,14 @@ export const App: React.FC = () => {
 
           {viewMode === "gallery" ? (
             <AlbumGalleryView
-              tracks={displayTracks}
+              tracks={filteredTracks}
               hasAnyTracks={activeTracks.length > 0}
               stagedMap={stagedMap}
               onSelectTrackIds={(ids) => setSelectedIds(new Set(ids))}
-              onPlayTrack={handlePlayTrack}
+              onPlayTrack={(t) => {
+                setPlayingTrackId(t.id);
+                setIsPlaying(true);
+              }}
               onQuickUnifyAlbum={() => setModalKind("unify")}
               onOpenScraperForAlbum={(albTracks) => {
                 setSelectedIds(new Set(albTracks.map((t) => t.id)));
@@ -1014,7 +936,7 @@ export const App: React.FC = () => {
             />
           ) : viewMode === "columns" ? (
             <ColumnBrowserView
-              tracks={displayTracks}
+              tracks={filteredTracks}
               hasAnyTracks={activeTracks.length > 0}
               selectedIds={selectedIds}
               stagedMap={stagedMap}
@@ -1022,7 +944,10 @@ export const App: React.FC = () => {
               onSelectTrack={handleSelectTrack}
               onSelectAll={(ids) => setSelectedIds(new Set(ids))}
               onStageFieldEdit={handleStageFieldEdit}
-              onPlayTrack={handlePlayTrack}
+              onPlayTrack={(t) => {
+                setPlayingTrackId(t.id);
+                setIsPlaying(true);
+              }}
               onRequestDeleteTracks={handleRequestDeleteTracks}
               onAddDirectory={handleAddDirectoryRequest}
               onTriggerFileImport={() => fileImportInputRef.current?.click()}
@@ -1030,7 +955,7 @@ export const App: React.FC = () => {
             />
           ) : (
             <ProSpreadsheetView
-              tracks={displayTracks}
+              tracks={filteredTracks}
               hasAnyTracks={activeTracks.length > 0}
               selectedIds={selectedIds}
               stagedMap={stagedMap}
@@ -1038,7 +963,10 @@ export const App: React.FC = () => {
               onSelectTrack={handleSelectTrack}
               onSelectAll={(ids) => setSelectedIds(new Set(ids))}
               onStageFieldEdit={handleStageFieldEdit}
-              onPlayTrack={handlePlayTrack}
+              onPlayTrack={(t) => {
+                setPlayingTrackId(t.id);
+                setIsPlaying(true);
+              }}
               onRequestDeleteTracks={handleRequestDeleteTracks}
               onAddDirectory={handleAddDirectoryRequest}
               onTriggerFileImport={() => fileImportInputRef.current?.click()}

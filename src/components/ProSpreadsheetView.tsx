@@ -287,7 +287,6 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
             return (
               <tr
                 key={t.id}
-                className={t.isOffline ? "offline" : undefined}
                 aria-selected={isSelected}
                 onClick={(e) =>
                   onSelectTrack(t.id, {

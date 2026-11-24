@@ -169,16 +169,4 @@ pub struct LibraryRoot {
     pub added_at: String,
     pub last_scan: Option<String>,
     pub track_count: usize,
-    pub source_uri: Option<String>,
-    pub is_network: bool,
-    /// 运行时计算:网络根的挂载点当前不可达即为离线,不入库。
-    pub is_offline: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkMountResult {
-    /// 挂载点 + 共享内子路径合成的扫描根路径。
-    pub root_path: String,
-    pub tracks: Vec<TrackRecord>,
 }

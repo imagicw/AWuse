@@ -1,5 +1,4 @@
 import React, { useRef, useState } from "react";
-import { isTauriEnvironment } from "../services/bridge";
 import {
   DiagnosticSummary,
   LibraryRoot,
@@ -12,7 +11,6 @@ import {
   IconFolder,
   IconFolderPlus,
   IconFolderTree,
-  IconGlobe,
   IconLibrary,
   IconRefresh,
   IconShieldCheck,
@@ -32,7 +30,6 @@ interface LeftSidebarProps {
   onSelectRootPath: (path: string | null) => void;
   onAddDirectoryRequest: () => void;
   onAddDirectoryByPath: (dirPath: string) => void;
-  onAddNetworkShare: (sourceUri: string, label: string | null) => void;
   onRescanRoot: (dirPath: string) => void;
   onRemoveRoot: (dirPath: string) => void;
   onImportFiles: (files: FileList | File[]) => void;
@@ -50,7 +47,6 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   onSelectRootPath,
   onAddDirectoryRequest,
   onAddDirectoryByPath,
-  onAddNetworkShare,
   onRescanRoot,
   onRemoveRoot,
   onImportFiles,
@@ -59,9 +55,6 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   const [dragOver, setDragOver] = useState(false);
   const [showManualPath, setShowManualPath] = useState(false);
   const [manualPath, setManualPath] = useState("");
-  const [showNetworkShare, setShowNetworkShare] = useState(false);
-  const [shareUri, setShareUri] = useState("");
-  const [shareLabel, setShareLabel] = useState("");
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -78,16 +71,6 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
     onAddDirectoryByPath(trimmed);
     setManualPath("");
     setShowManualPath(false);
-  };
-
-  const handleShareSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const uri = shareUri.trim();
-    if (!uri) return;
-    onAddNetworkShare(uri, shareLabel.trim() || null);
-    setShareUri("");
-    setShareLabel("");
-    setShowNetworkShare(false);
   };
 
   return (
@@ -165,27 +148,11 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
         <div className="sidebar-section-header">
           <h2 className="sidebar-section-title">自定义音乐目录</h2>
           <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            {isTauriEnvironment() && (
-              <button
-                type="button"
-                className="sidebar-add-btn"
-                title="挂载网络共享 (SMB)"
-                onClick={() => {
-                  setShowNetworkShare((v) => !v);
-                  setShowManualPath(false);
-                }}
-              >
-                <IconGlobe size={12} />
-              </button>
-            )}
             <button
               type="button"
               className="sidebar-add-btn"
               title="手动输入文件夹路径"
-              onClick={() => {
-                setShowManualPath((v) => !v);
-                setShowNetworkShare(false);
-              }}
+              onClick={() => setShowManualPath((v) => !v)}
             >
               路径
             </button>
@@ -226,39 +193,6 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           </form>
         )}
 
-        {showNetworkShare && (
-          <form className="dir-inline-form" onSubmit={handleShareSubmit}>
-            <input
-              type="text"
-              className="field-input mono"
-              placeholder="smb://nas.local/music[/子目录]"
-              aria-label="输入 SMB 网络共享地址"
-              value={shareUri}
-              onChange={(e) => setShareUri(e.target.value)}
-            />
-            <input
-              type="text"
-              className="field-input"
-              placeholder="显示名(可选)"
-              aria-label="网络共享显示名"
-              value={shareLabel}
-              onChange={(e) => setShareLabel(e.target.value)}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "6px" }}>
-              <button
-                type="button"
-                className="sidebar-add-btn"
-                onClick={() => setShowNetworkShare(false)}
-              >
-                取消
-              </button>
-              <button type="submit" className="sidebar-add-btn">
-                挂载并扫描
-              </button>
-            </div>
-          </form>
-        )}
-
         {libraryRoots.length === 0 ? (
           <div className="dir-empty-hint">
             暂无已添加目录，点击右上角「添加」挂载本地无损音乐文件夹。
@@ -270,29 +204,20 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               return (
                 <li
                   key={root.path}
-                  className={`dir-root-item ${isSelected ? "active" : ""} ${
-                    root.isOffline ? "offline" : ""
-                  }`}
+                  className={`dir-root-item ${isSelected ? "active" : ""}`}
                 >
                   <button
                     type="button"
                     className="dir-root-main"
-                    title={root.isOffline ? `${root.path}(离线)` : root.path}
+                    title={root.path}
                     aria-pressed={isSelected}
                     onClick={() =>
                       onSelectRootPath(isSelected ? null : root.path)
                     }
                   >
                     <span className="nav-item-left">
-                      {root.isNetwork ? (
-                        <IconGlobe size={14} />
-                      ) : (
-                        <IconFolder size={14} />
-                      )}
+                      <IconFolder size={14} />
                       <span className="nav-item-label">{root.label}</span>
-                      {root.isOffline && (
-                        <span className="root-offline-tag">离线</span>
-                      )}
                     </span>
                     <span className="nav-count tabular-nums">{root.trackCount}</span>
                   </button>

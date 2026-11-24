@@ -208,31 +208,10 @@ export async function bridgeScanDirectory(
       addedAt: now,
       lastScan: now,
       trackCount: 0,
-      sourceUri: null,
-      isNetwork: false,
-      isOffline: false,
     });
   }
   saveBrowserRoots(roots);
   return null;
-}
-
-export interface NetworkMountResult {
-  rootPath: string;
-  tracks: TrackRecord[];
-}
-
-export async function bridgeMountNetworkShare(
-  sourceUri: string,
-  label: string | null
-): Promise<NetworkMountResult> {
-  if (isTauriEnvironment()) {
-    return invoke<NetworkMountResult>("mount_network_share", {
-      sourceUri,
-      label,
-    });
-  }
-  throw new Error("浏览器预览模式不支持挂载网络共享");
 }
 
 export async function bridgeRemoveLibraryRoot(dirPath: string): Promise<void> {

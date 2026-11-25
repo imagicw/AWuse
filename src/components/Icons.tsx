@@ -252,3 +252,32 @@ export const IconEditRule: React.FC<IconProps> = ({ size, className }) => (
     <path d="m14.5 16.5 4.8-4.8a1.4 1.4 0 0 1 2 2l-4.8 4.8-2.6.6.6-2.6Z" />
   </svg>
 );
+
+export const IconSliders: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M4 8h10" />
+    <path d="M18 8h2" />
+    <circle cx="16" cy="8" r="2" />
+    <path d="M4 16h2" />
+    <path d="M10 16h10" />
+    <circle cx="8" cy="16" r="2" />
+  </svg>
+);
+
+export const IconChevronDown: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="m6 9.5 6 6 6-6" />
+  </svg>
+);
+
+export const IconChevronLeft: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="m15 6-6 6 6 6" />
+  </svg>
+);
+
+export const IconTools: React.FC<IconProps> = ({ size, className }) => (
+  <svg {...base(size, className)}>
+    <path d="M14.7 6.3a4.2 4.2 0 0 0-5.6 5.2L4 16.6a1.9 1.9 0 0 0 2.7 2.7l5.1-5.1a4.2 4.2 0 0 0 5.2-5.6l-2.6 2.6-2.3-.7-.7-2.3 2.6-2.6Z" />
+  </svg>
+);

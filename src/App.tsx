@@ -9,7 +9,6 @@ import {
   ThemePreference,
   TrackRecord,
   TransactionRecord,
-  WorkspaceMode,
 } from "./types/music";
 import {
   bridgeCommitChanges,
@@ -31,18 +30,16 @@ import { LeftSidebar } from "./components/LeftSidebar";
 import { AlbumGalleryView } from "./components/AlbumGalleryView";
 import { ColumnBrowserView } from "./components/ColumnBrowserView";
 import { ProSpreadsheetView } from "./components/ProSpreadsheetView";
-import { RightInspector } from "./components/RightInspector";
+import { TrackInspectorDialog } from "./components/TrackInspectorDialog";
+import { BatchToolsMenu } from "./components/BatchToolsMenu";
 import { BatchModals } from "./components/BatchModals";
 import { MiniTransportBar } from "./components/MiniTransportBar";
 import {
   IconClose,
-  IconEditRule,
   IconFilter,
-  IconFolderTree,
-  IconGlobe,
-  IconLanguages,
-  IconLayers,
-  IconShieldCheck,
+  IconGrid,
+  IconSliders,
+  IconTable,
   IconTrash,
 } from "./components/Icons";
 
@@ -54,15 +51,14 @@ function normalizePathPrefix(dirPath: string): string {
 }
 
 export const App: React.FC = () => {
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("library");
   const [viewMode, setViewMode] = useState<CenterViewMode>("spreadsheet");
   const [scope, setScope] = useState<SidebarScope>("all");
+  const [albumDisplay, setAlbumDisplay] = useState<"cards" | "table">("cards");
   const [activeRootPath, setActiveRootPath] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [pinyinFilter, setPinyinFilter] = useState<string>("ALL");
 
   const [libraryTracks, setLibraryTracks] = useState<TrackRecord[]>([]);
-  const [stagingTracks, setStagingTracks] = useState<TrackRecord[]>([]);
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([]);
   const hydratedRef = useRef(false);
 
@@ -74,6 +70,10 @@ export const App: React.FC = () => {
   );
   const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
   const [modalKind, setModalKind] = useState<BatchModalKind>(null);
+  const [stagedQueueTab, setStagedQueueTab] = useState<"staged" | "history">(
+    "staged"
+  );
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -142,8 +142,8 @@ export const App: React.FC = () => {
           bridgeListLibraryRoots(),
         ]);
         if (cancelled) return;
-        setLibraryTracks(lib);
-        setStagingTracks(stg);
+        // Legacy staging-workspace records merge into the single library
+        setLibraryTracks([...lib, ...stg]);
         setLibraryRoots(roots);
       } finally {
         hydratedRef.current = true;
@@ -157,8 +157,8 @@ export const App: React.FC = () => {
   // Persist browser-mode tracks cleanly when updated
   useEffect(() => {
     if (!hydratedRef.current || isTauriEnvironment()) return;
-    saveBrowserTracks([...libraryTracks, ...stagingTracks]);
-  }, [libraryTracks, stagingTracks]);
+    saveBrowserTracks(libraryTracks);
+  }, [libraryTracks]);
 
   // Open / close native <dialog> for delete confirmation
   useEffect(() => {
@@ -196,15 +196,13 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  const activeTracks =
-    workspaceMode === "library" ? libraryTracks : stagingTracks;
-  const setActiveTracks =
-    workspaceMode === "library" ? setLibraryTracks : setStagingTracks;
+  const activeTracks = libraryTracks;
+  const setActiveTracks = setLibraryTracks;
 
   // Compute live root counts in browser mode while keeping Tauri's counts in sync
   const displayRoots = useMemo<LibraryRoot[]>(() => {
     if (isTauriEnvironment()) return libraryRoots;
-    const all = [...libraryTracks, ...stagingTracks];
+    const all = libraryTracks;
     return libraryRoots.map((root) => {
       const prefix = normalizePathPrefix(root.path);
       const count = all.filter(
@@ -212,13 +210,15 @@ export const App: React.FC = () => {
       ).length;
       return { ...root, trackCount: count };
     });
-  }, [libraryRoots, libraryTracks, stagingTracks]);
+  }, [libraryRoots, libraryTracks]);
 
-  const handleChangeScope = (nextScope: SidebarScope) => {
+  const handleChangeScope = useCallback((nextScope: SidebarScope) => {
     setScope(nextScope);
     if (nextScope === "albums") setViewMode("gallery");
-    else if (nextScope === "artists") setViewMode("columns");
-  };
+    else if (nextScope === "artists" || nextScope === "folders")
+      setViewMode("columns");
+    else setViewMode("spreadsheet");
+  }, []);
 
   const diagnostics = useMemo(
     () => computeDiagnosticsFromTracks(activeTracks),
@@ -303,33 +303,78 @@ export const App: React.FC = () => {
   const batchTargetTracks =
     selectedTracks.length > 0 ? selectedTracks : filteredTracks;
 
+  // Apple Music Get Info style: prev/next navigation through the current
+  // track list while the inspector stays open (single-track editing only —
+  // multi-select is batch editing and arrows would be ambiguous).
+  const inspectorNav = useMemo(() => {
+    if (!inspectorOpen || selectedTracks.length !== 1) return null;
+    const idx = filteredTracks.findIndex((t) => t.id === selectedTracks[0].id);
+    if (idx < 0) return null;
+    return {
+      hasPrev: idx > 0,
+      hasNext: idx < filteredTracks.length - 1,
+      position: `${idx + 1} / ${filteredTracks.length}`,
+      go: (dir: -1 | 1) => {
+        const nt = filteredTracks[idx + dir];
+        if (nt) {
+          setSelectedIds(new Set([nt.id]));
+          lastClickedIdRef.current = nt.id;
+        }
+      },
+    };
+  }, [inspectorOpen, selectedTracks, filteredTracks]);
+
   const stagedList = useMemo(
     () => Array.from(stagedMap.values()),
     [stagedMap]
   );
 
+  const trackById = useMemo(() => {
+    const m = new Map<string, TrackRecord>();
+    for (const t of activeTracks) m.set(t.id, t);
+    return m;
+  }, [activeTracks]);
+
   const stageChanges = useCallback(
     (changes: StagedChange[]) => {
       if (changes.length === 0) return;
-      setStagedMap((prev) => {
-        const next = new Map(prev);
-        for (const c of changes) {
-          const existing = next.get(c.trackId);
-          if (existing) {
-            next.set(c.trackId, {
-              trackId: c.trackId,
-              patch: { ...existing.patch, ...c.patch },
-              reason: c.reason,
-            });
-          } else {
-            next.set(c.trackId, c);
+      const next = new Map(stagedMap);
+      let effective = 0;
+      for (const c of changes) {
+        const existing = next.get(c.trackId);
+        const merged = existing
+          ? { ...existing.patch, ...c.patch }
+          : { ...c.patch };
+        const track = trackById.get(c.trackId);
+        if (track) {
+          for (const k of Object.keys(merged) as (keyof TagPatch)[]) {
+            const v = merged[k];
+            const orig =
+              k === "newFilePath"
+                ? track.filePath
+                : (track[k as keyof TrackRecord] as unknown);
+            if (v === undefined || v === orig) delete merged[k];
           }
         }
-        return next;
-      });
-      showStatus(`已暂存 ${changes.length} 项变更预览（按 ⌘S 写入落盘）`);
+        if (Object.keys(merged).length === 0) {
+          next.delete(c.trackId);
+        } else {
+          next.set(c.trackId, {
+            trackId: c.trackId,
+            patch: merged,
+            reason: c.reason,
+          });
+          effective += 1;
+        }
+      }
+      setStagedMap(next);
+      showStatus(
+        effective > 0
+          ? `已暂存 ${effective} 项变更预览（按 ⌘S 写入落盘）`
+          : "已还原为原始值（移出暂存队列）"
+      );
     },
-    [showStatus]
+    [stagedMap, trackById, showStatus]
   );
 
   const handleStageFieldEdit = useCallback(
@@ -383,7 +428,6 @@ export const App: React.FC = () => {
       }
 
       setLibraryTracks((prev) => prev.map((t) => restoreById.get(t.id) ?? t));
-      setStagingTracks((prev) => prev.map((t) => restoreById.get(t.id) ?? t));
       setTransactions((prev) =>
         prev.map((tx) => (tx.id === txId ? { ...tx, reverted: true } : tx))
       );
@@ -394,8 +438,19 @@ export const App: React.FC = () => {
 
   const handleRequestDeleteTracks = useCallback((trackIds: string[]) => {
     if (trackIds.length === 0) return;
+    setInspectorOpen(false);
     setDeleteFromDisk(false);
     setPendingDeleteIds(trackIds);
+  }, []);
+
+  const handleInspectTrack = useCallback((track: TrackRecord) => {
+    setSelectedIds(new Set([track.id]));
+    lastClickedIdRef.current = track.id;
+    setInspectorOpen(true);
+  }, []);
+
+  const handleOpenInspector = useCallback(() => {
+    setInspectorOpen(true);
   }, []);
 
   const handleConfirmDeleteTracks = async () => {
@@ -406,7 +461,6 @@ export const App: React.FC = () => {
       await bridgeDeleteTracks(pendingDeleteIds, deleteFromDisk);
 
       setLibraryTracks((prev) => prev.filter((t) => !idSet.has(t.id)));
-      setStagingTracks((prev) => prev.filter((t) => !idSet.has(t.id)));
       setSelectedIds((prev) => {
         const next = new Set(prev);
         for (const id of pendingDeleteIds) next.delete(id);
@@ -457,7 +511,12 @@ export const App: React.FC = () => {
         return;
       }
 
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !inInput) {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.key.toLowerCase() === "z" &&
+        !inInput &&
+        !inspectorOpen
+      ) {
         const latest = transactions.find((tx) => !tx.reverted);
         if (latest) {
           e.preventDefault();
@@ -466,14 +525,27 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (inInput || modalKind || pendingDeleteIds.length > 0) return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "i") {
+        if (
+          !modalKind &&
+          pendingDeleteIds.length === 0 &&
+          (selectedIds.size > 0 || inspectorOpen)
+        ) {
+          e.preventDefault();
+          setInspectorOpen((o) => !o);
+        }
+        return;
+      }
+
+      if (inInput || modalKind || pendingDeleteIds.length > 0 || inspectorOpen)
+        return;
 
       if ((e.key === "Delete" || e.key === "Backspace") && selectedIds.size > 0) {
         e.preventDefault();
         handleRequestDeleteTracks(Array.from(selectedIds));
-      } else if (e.key === "1") setViewMode("gallery");
-      else if (e.key === "2") setViewMode("columns");
-      else if (e.key === "3") setViewMode("spreadsheet");
+      } else if (e.key === "1") handleChangeScope("albums");
+      else if (e.key === "2") handleChangeScope("artists");
+      else if (e.key === "3") handleChangeScope("all");
       else if (e.key === " ") {
         e.preventDefault();
         setIsPlaying((p) => !p);
@@ -486,8 +558,10 @@ export const App: React.FC = () => {
     handleCommitStaged,
     handleRevertTransaction,
     handleRequestDeleteTracks,
+    handleChangeScope,
     transactions,
     modalKind,
+    inspectorOpen,
     pendingDeleteIds.length,
     selectedIds,
   ]);
@@ -539,13 +613,13 @@ export const App: React.FC = () => {
         if (firstRel && firstRel.includes("/")) {
           const topDir = firstRel.split("/")[0];
           virtualRoot = `/${topDir}`;
-          await bridgeScanDirectory(virtualRoot, workspaceMode);
+          await bridgeScanDirectory(virtualRoot, "library");
         }
       }
 
       const parsed = await Promise.all(
         files.map(async (f) => {
-          const rec = await parseLocalAudioFile(f, workspaceMode);
+          const rec = await parseLocalAudioFile(f, "library");
           const relPath = (f as File & { webkitRelativePath?: string })
             .webkitRelativePath;
           if (relPath && relPath.includes("/")) {
@@ -567,7 +641,7 @@ export const App: React.FC = () => {
       if (virtualRoot) setActiveRootPath(virtualRoot);
       showStatus(`已解析并导入 ${parsed.length} 个本地音频文件`);
     },
-    [workspaceMode, setActiveTracks, showStatus]
+    [setActiveTracks, showStatus]
   );
 
   const handleScanDirectoryPath = useCallback(
@@ -575,9 +649,9 @@ export const App: React.FC = () => {
       const trimmed = dirPath.trim();
       if (!trimmed) return;
       showStatus(`正在扫描目录 ${trimmed}…`);
-      const scanned = await bridgeScanDirectory(trimmed, workspaceMode);
+      const scanned = await bridgeScanDirectory(trimmed, "library");
       const [refreshedTracks, roots] = await Promise.all([
-        bridgeQueryTracks(workspaceMode),
+        bridgeQueryTracks("library"),
         bridgeListLibraryRoots(),
       ]);
       setLibraryRoots(roots);
@@ -592,7 +666,7 @@ export const App: React.FC = () => {
         showStatus(`已添加自定义目录「${trimmed}」，可拖拽该目录内文件导入解析`);
       }
     },
-    [workspaceMode, setActiveTracks, showStatus]
+    [setActiveTracks, showStatus]
   );
 
   const handleAddDirectoryRequest = useCallback(async () => {
@@ -615,9 +689,6 @@ export const App: React.FC = () => {
       await bridgeRemoveLibraryRoot(dirPath);
       const prefix = normalizePathPrefix(dirPath);
       setLibraryTracks((prev) =>
-        prev.filter((t) => !t.filePath.startsWith(prefix) && t.filePath !== dirPath)
-      );
-      setStagingTracks((prev) =>
         prev.filter((t) => !t.filePath.startsWith(prefix) && t.filePath !== dirPath)
       );
       if (activeRootPath === dirPath) {
@@ -660,14 +731,13 @@ export const App: React.FC = () => {
   const playingTrack = useMemo(
     () =>
       libraryTracks.find((t) => t.id === playingTrackId) ||
-      stagingTracks.find((t) => t.id === playingTrackId) ||
       selectedTracks[0] ||
       null,
-    [libraryTracks, stagingTracks, playingTrackId, selectedTracks]
+    [libraryTracks, playingTrackId, selectedTracks]
   );
 
   const scopeTitles: Record<SidebarScope, string> = {
-    all: workspaceMode === "library" ? "全部媒体库音轨" : "临时工作区待整理音轨",
+    all: "全部媒体库音轨",
     artists: "按歌手聚合视图",
     albums: "专辑画廊浏览",
     folders: "目录路径结构",
@@ -706,28 +776,21 @@ export const App: React.FC = () => {
   return (
     <div className="workbench-shell">
       <TopToolbar
-        workspaceMode={workspaceMode}
-        onChangeWorkspaceMode={(m) => {
-          setWorkspaceMode(m);
-          setSelectedIds(new Set());
-          setScope("all");
-          setPinyinFilter("ALL");
-        }}
-        viewMode={viewMode}
-        onChangeViewMode={setViewMode}
         searchQuery={searchQuery}
         onChangeSearchQuery={setSearchQuery}
         stagedCount={stagedMap.size}
         transactionCount={transactions.length}
         onCommitStaged={handleCommitStaged}
-        onOpenModal={setModalKind}
+        onOpenModal={(kind, queueTab) => {
+          if (queueTab) setStagedQueueTab(queueTab);
+          setModalKind(kind);
+        }}
         theme={theme}
         onCycleTheme={cycleTheme}
       />
 
       <div className="workbench-body">
         <LeftSidebar
-          workspaceMode={workspaceMode}
           scope={scope}
           onChangeScope={handleChangeScope}
           diagnostics={diagnostics}
@@ -737,10 +800,8 @@ export const App: React.FC = () => {
           activeRootPath={activeRootPath}
           onSelectRootPath={setActiveRootPath}
           onAddDirectoryRequest={handleAddDirectoryRequest}
-          onAddDirectoryByPath={handleScanDirectoryPath}
           onRescanRoot={handleScanDirectoryPath}
           onRemoveRoot={handleRemoveRoot}
-          onImportFiles={(files) => handleImportFiles(files, false)}
         />
 
         <main
@@ -763,6 +824,32 @@ export const App: React.FC = () => {
             </div>
 
             <div className="batch-action-strip">
+              {scope === "albums" && (
+                <div
+                  className="segmented-control"
+                  role="group"
+                  aria-label="专辑展示方式"
+                >
+                  <button
+                    type="button"
+                    className="seg-btn"
+                    aria-pressed={albumDisplay === "cards"}
+                    title="卡片视图"
+                    onClick={() => setAlbumDisplay("cards")}
+                  >
+                    <IconGrid size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    className="seg-btn"
+                    aria-pressed={albumDisplay === "table"}
+                    title="表格视图"
+                    onClick={() => setAlbumDisplay("table")}
+                  >
+                    <IconTable size={12} />
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 className={`chip-btn ${pinyinFilter !== "ALL" ? "active" : ""}`}
@@ -775,53 +862,21 @@ export const App: React.FC = () => {
                   {pinyinFilter === "ALL" ? "拼音筛选" : `拼音: ${pinyinFilter}`}
                 </span>
               </button>
+              <BatchToolsMenu onOpenModal={setModalKind} />
+              <span className="subbar-divider" aria-hidden="true" />
               <button
                 type="button"
                 className="chip-btn"
-                onClick={() => setModalKind("filename")}
+                disabled={selectedIds.size === 0}
+                title={
+                  selectedIds.size === 0
+                    ? "先在列表中选中音轨"
+                    : "打开所选音轨的属性检查器 (⌘I)"
+                }
+                onClick={handleOpenInspector}
               >
-                <IconEditRule size={12} />
-                <span>Finder 批量规则</span>
-              </button>
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => setModalKind("reorganize")}
-              >
-                <IconFolderTree size={12} />
-                <span>目录重整</span>
-              </button>
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => setModalKind("unify")}
-              >
-                <IconLayers size={12} />
-                <span>专辑归并</span>
-              </button>
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => setModalKind("cjk")}
-              >
-                <IconLanguages size={12} />
-                <span>CJK清洗</span>
-              </button>
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => setModalKind("scraper")}
-              >
-                <IconGlobe size={12} />
-                <span>在线刮削</span>
-              </button>
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => setModalKind("md5_audit")}
-              >
-                <IconShieldCheck size={12} />
-                <span>MD5 巡检</span>
+                <IconSliders size={12} />
+                <span>属性编辑</span>
               </button>
               {selectedIds.size > 0 && (
                 <button
@@ -916,19 +971,19 @@ export const App: React.FC = () => {
 
           {viewMode === "gallery" ? (
             <AlbumGalleryView
+              displayMode={albumDisplay}
               tracks={filteredTracks}
               hasAnyTracks={activeTracks.length > 0}
               stagedMap={stagedMap}
+              selectedIds={selectedIds}
+              playingTrackId={playingTrackId}
               onSelectTrackIds={(ids) => setSelectedIds(new Set(ids))}
               onPlayTrack={(t) => {
                 setPlayingTrackId(t.id);
                 setIsPlaying(true);
               }}
+              onInspectTrack={handleInspectTrack}
               onQuickUnifyAlbum={() => setModalKind("unify")}
-              onOpenScraperForAlbum={(albTracks) => {
-                setSelectedIds(new Set(albTracks.map((t) => t.id)));
-                setModalKind("scraper");
-              }}
               onRequestDeleteTracks={handleRequestDeleteTracks}
               onAddDirectory={handleAddDirectoryRequest}
               onTriggerFileImport={() => fileImportInputRef.current?.click()}
@@ -936,6 +991,7 @@ export const App: React.FC = () => {
             />
           ) : viewMode === "columns" ? (
             <ColumnBrowserView
+              scope={scope}
               tracks={filteredTracks}
               hasAnyTracks={activeTracks.length > 0}
               selectedIds={selectedIds}
@@ -948,6 +1004,7 @@ export const App: React.FC = () => {
                 setPlayingTrackId(t.id);
                 setIsPlaying(true);
               }}
+              onInspectTrack={handleInspectTrack}
               onRequestDeleteTracks={handleRequestDeleteTracks}
               onAddDirectory={handleAddDirectoryRequest}
               onTriggerFileImport={() => fileImportInputRef.current?.click()}
@@ -967,6 +1024,7 @@ export const App: React.FC = () => {
                 setPlayingTrackId(t.id);
                 setIsPlaying(true);
               }}
+              onInspectTrack={handleInspectTrack}
               onRequestDeleteTracks={handleRequestDeleteTracks}
               onAddDirectory={handleAddDirectoryRequest}
               onTriggerFileImport={() => fileImportInputRef.current?.click()}
@@ -996,15 +1054,6 @@ export const App: React.FC = () => {
             </div>
           )}
         </main>
-
-        <RightInspector
-          selectedTracks={selectedTracks}
-          stagedMap={stagedMap}
-          onStageBatchPatch={handleStageBatchPatch}
-          onVerifyTrackMd5={handleVerifySingleMd5}
-          onOpenScraper={() => setModalKind("scraper")}
-          onRequestDeleteTracks={handleRequestDeleteTracks}
-        />
       </div>
 
       <MiniTransportBar
@@ -1013,8 +1062,20 @@ export const App: React.FC = () => {
         onTogglePlay={() => setIsPlaying((p) => !p)}
       />
 
+      <TrackInspectorDialog
+        open={inspectorOpen}
+        selectedTracks={selectedTracks}
+        stagedMap={stagedMap}
+        trackNav={inspectorNav}
+        onStageBatchPatch={handleStageBatchPatch}
+        onVerifyTrackMd5={handleVerifySingleMd5}
+        onOpenScraper={() => setModalKind("scraper")}
+        onClose={() => setInspectorOpen(false)}
+      />
+
       <BatchModals
         modalKind={modalKind}
+        stagedQueueTab={stagedQueueTab}
         onClose={() => setModalKind(null)}
         targetTracks={batchTargetTracks}
         allTracks={activeTracks}

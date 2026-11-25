@@ -1,9 +1,8 @@
-import React, { useRef, useState } from "react";
+import React from "react";
 import {
   DiagnosticSummary,
   LibraryRoot,
   SidebarScope,
-  WorkspaceMode,
 } from "../types/music";
 import {
   IconAlert,
@@ -15,11 +14,9 @@ import {
   IconRefresh,
   IconShieldCheck,
   IconTrash,
-  IconUpload,
 } from "./Icons";
 
 interface LeftSidebarProps {
-  workspaceMode: WorkspaceMode;
   scope: SidebarScope;
   onChangeScope: (scope: SidebarScope) => void;
   diagnostics: DiagnosticSummary;
@@ -29,14 +26,11 @@ interface LeftSidebarProps {
   activeRootPath: string | null;
   onSelectRootPath: (path: string | null) => void;
   onAddDirectoryRequest: () => void;
-  onAddDirectoryByPath: (dirPath: string) => void;
   onRescanRoot: (dirPath: string) => void;
   onRemoveRoot: (dirPath: string) => void;
-  onImportFiles: (files: FileList | File[]) => void;
 }
 
 export const LeftSidebar: React.FC<LeftSidebarProps> = ({
-  workspaceMode,
   scope,
   onChangeScope,
   diagnostics,
@@ -46,39 +40,13 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   activeRootPath,
   onSelectRootPath,
   onAddDirectoryRequest,
-  onAddDirectoryByPath,
   onRescanRoot,
   onRemoveRoot,
-  onImportFiles,
 }) => {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [dragOver, setDragOver] = useState(false);
-  const [showManualPath, setShowManualPath] = useState(false);
-  const [manualPath, setManualPath] = useState("");
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      onImportFiles(e.dataTransfer.files);
-    }
-  };
-
-  const handleManualSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = manualPath.trim();
-    if (!trimmed) return;
-    onAddDirectoryByPath(trimmed);
-    setManualPath("");
-    setShowManualPath(false);
-  };
-
   return (
     <aside className="left-sidebar scroller" aria-label="媒体库导航与目录管理">
       <div>
-        <h2 className="sidebar-section-title">
-          {workspaceMode === "library" ? "媒体库浏览" : "临时待整理区"}
-        </h2>
+        <h2 className="sidebar-section-title">媒体库浏览</h2>
         <nav aria-label="曲库维度">
           <ul className="nav-list">
             <li>
@@ -147,51 +115,16 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
       <div>
         <div className="sidebar-section-header">
           <h2 className="sidebar-section-title">自定义音乐目录</h2>
-          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            <button
-              type="button"
-              className="sidebar-add-btn"
-              title="手动输入文件夹路径"
-              onClick={() => setShowManualPath((v) => !v)}
-            >
-              路径
-            </button>
-            <button
-              type="button"
-              className="sidebar-add-btn"
-              onClick={onAddDirectoryRequest}
-              title="添加自定义音乐目录"
-            >
-              <IconFolderPlus size={12} />
-              <span>添加</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            className="sidebar-add-btn"
+            onClick={onAddDirectoryRequest}
+            title="浏览并添加本地音乐目录"
+          >
+            <IconFolderPlus size={12} />
+            <span>添加</span>
+          </button>
         </div>
-
-        {showManualPath && (
-          <form className="dir-inline-form" onSubmit={handleManualSubmit}>
-            <input
-              type="text"
-              className="field-input mono"
-              placeholder="/Users/name/Music/Lossless"
-              aria-label="输入本地音乐目录路径"
-              value={manualPath}
-              onChange={(e) => setManualPath(e.target.value)}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "6px" }}>
-              <button
-                type="button"
-                className="sidebar-add-btn"
-                onClick={() => setShowManualPath(false)}
-              >
-                取消
-              </button>
-              <button type="submit" className="sidebar-add-btn">
-                挂载并扫描
-              </button>
-            </div>
-          </form>
-        )}
 
         {libraryRoots.length === 0 ? (
           <div className="dir-empty-hint">
@@ -377,55 +310,6 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
         </nav>
       </div>
 
-      {/* Drop Zone */}
-      <div
-        className={`drop-zone-box ${dragOver ? "drag-over" : ""}`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={handleDrop}
-      >
-        <div className="drop-zone-title">
-          <IconUpload size={14} />
-          <span>导入音频 / 扫描目录</span>
-        </div>
-        <div className="drop-zone-sub">
-          拖入本地 <code>.flac</code> / <code>.m4a</code> / <code>.mp3</code> 文件，或添加文件夹建立持久曲库。
-        </div>
-        <div style={{ display: "flex", gap: "8px", marginTop: "2px" }}>
-          <button
-            type="button"
-            className="chip-btn"
-            style={{ flex: 1, justifyContent: "center" }}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            选文件
-          </button>
-          <button
-            type="button"
-            className="chip-btn"
-            style={{ flex: 1, justifyContent: "center" }}
-            onClick={onAddDirectoryRequest}
-          >
-            添加目录
-          </button>
-        </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".flac,.m4a,.mp3,.wav,.ogg,audio/*"
-          className="visually-hidden"
-          onChange={(e) => {
-            if (e.target.files && e.target.files.length > 0) {
-              onImportFiles(e.target.files);
-              e.target.value = "";
-            }
-          }}
-        />
-      </div>
     </aside>
   );
 };

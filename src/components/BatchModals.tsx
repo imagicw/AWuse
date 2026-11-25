@@ -14,6 +14,7 @@ import {
 } from "../types/music";
 import {
   applyFinderBatchRule,
+  containsKana,
   convertTraditionalSimplified,
   looksLikeMojibake,
   normalizeCjkPunctuation,
@@ -40,6 +41,7 @@ interface BatchModalsProps {
   onDiscardAllStaged: () => void;
   onCommitStaged: () => void;
   onRevertTransaction: (txId: string) => void;
+  stagedQueueTab: "staged" | "history";
   onUpdateTrackMd5Status: (
     trackId: string,
     status: TrackRecord["specs"]["md5Verified"]
@@ -78,7 +80,7 @@ function supportsTopLayerExit(): boolean {
   );
 }
 
-async function closeTopLayer(dialog: HTMLDialogElement) {
+export async function closeTopLayer(dialog: HTMLDialogElement) {
   if (!dialog.open) return;
   if (!supportsTopLayerExit()) {
     dialog.setAttribute("data-closing", "");
@@ -107,6 +109,7 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
   onCommitStaged,
   onRevertTransaction,
   onUpdateTrackMd5Status,
+  stagedQueueTab,
 }) => {
   const dialogRef = useRef<HTMLDialogElement>(null);
 
@@ -160,8 +163,11 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
   const [scraperResults, setScraperResults] = useState<OnlineSearchResult[]>([]);
   const [scraperLoading, setScraperLoading] = useState(false);
 
-  // 6. Staged Queue tab
+  // 6. Staged Queue tab — entry point (历史 button vs 待写预览 pill) picks the tab
   const [queueTab, setQueueTab] = useState<"staged" | "history">("staged");
+  useEffect(() => {
+    if (modalKind === "staged_queue") setQueueTab(stagedQueueTab);
+  }, [modalKind, stagedQueueTab]);
 
   // 7. MD5 audit state
   const [auditing, setAuditing] = useState(false);
@@ -305,8 +311,9 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
 
       if (cjkGenSort) {
         const baseArtist = nextAa || nextArtist;
-        const aSort = toPinyinSortKey(baseArtist);
-        const albSort = toPinyinSortKey(nextAlbum);
+        // Japanese names shouldn't get zh-pinyin sort keys
+        const aSort = containsKana(baseArtist) ? "" : toPinyinSortKey(baseArtist);
+        const albSort = containsKana(nextAlbum) ? "" : toPinyinSortKey(nextAlbum);
         if (aSort && aSort !== t.artistSort) patch.artistSort = aSort;
         if (albSort && albSort !== t.albumSort) patch.albumSort = albSort;
       }
@@ -542,6 +549,7 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
                           {c.patch.albumArtist && <div>Album Artist → {c.patch.albumArtist}</div>}
                           {c.patch.discNumber && <div>Disc → {c.patch.discNumber}</div>}
                           {c.patch.album && <div>Album → {c.patch.album}</div>}
+                          {c.patch.artistSort && <div>ARTISTSORT → {c.patch.artistSort}</div>}
                         </td>
                       </tr>
                     );
@@ -1204,14 +1212,18 @@ export const BatchModals: React.FC<BatchModalsProps> = ({
                         <td className="diff-old">
                           {c.patch.title && <div>标题: {o?.title}</div>}
                           {c.patch.artist && <div>歌手: {o?.artist}</div>}
+                          {c.patch.albumArtist && <div>专辑歌手: {o?.albumArtist || "（空）"}</div>}
                           {c.patch.album && <div>专辑: {o?.album}</div>}
                           {c.patch.artistSort && <div>ARTISTSORT: {o?.artistSort || "（空）"}</div>}
+                          {c.patch.albumSort && <div>ALBUMSORT: {o?.albumSort || "（空）"}</div>}
                         </td>
                         <td className="diff-new">
                           {c.patch.title && <div>标题: {c.patch.title}</div>}
                           {c.patch.artist && <div>歌手: {c.patch.artist}</div>}
+                          {c.patch.albumArtist && <div>专辑歌手: {c.patch.albumArtist}</div>}
                           {c.patch.album && <div>专辑: {c.patch.album}</div>}
                           {c.patch.artistSort && <div>ARTISTSORT: {c.patch.artistSort}</div>}
+                          {c.patch.albumSort && <div>ALBUMSORT: {c.patch.albumSort}</div>}
                         </td>
                       </tr>
                     );

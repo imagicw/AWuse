@@ -101,33 +101,50 @@ export function toPinyinSortKey(text: string): string {
   return tokens.join(" ");
 }
 
+// Mojibake from a legacy codepage read as Latin-1 shows up as runs of >=2
+// Latin-1 chars (each source byte maps to one such char). A single char like
+// "é" in "Beyoncé" or "°" is legitimate text, not mojibake.
+const MOJIBAKE_RUN = /[\u0080-\u00ff]{2,}/g;
+const MOJIBAKE_RUN_TEST = /[\u0080-\u00ff]{2,}/;
+const KANA_RE = /[\u3040-\u30ff\uff66-\uff9d]/;
+
+export function containsKana(text: string): boolean {
+  return KANA_RE.test(text);
+}
+
 export function looksLikeMojibake(text: string): boolean {
-  return /[\u0080-\u00ff]/.test(text);
+  return MOJIBAKE_RUN_TEST.test(text);
 }
 
 /**
- * Decode ISO-8859-1 misinterpreted bytes back as GB18030 / Big5 / Shift-JIS -> UTF-8.
+ * Decode ISO-8859-1 misinterpreted byte runs back as GB18030 / Big5 / Shift-JIS
+ * -> UTF-8. Only the Latin-1 runs are re-decoded; surrounding valid text
+ * (e.g. Japanese kanji/kana mixed with one corrupted segment) is preserved.
  */
 export function repairMojibake(
   text: string,
   encoding: "gb18030" | "big5" | "shift_jis" = "gb18030"
 ): string {
   if (!looksLikeMojibake(text)) return text;
-  const bytes = new Uint8Array(
-    Array.from(text).map((c) => c.charCodeAt(0) & 0xff)
-  );
-  try {
-    const decoder = new TextDecoder(encoding, { fatal: false });
-    return decoder.decode(bytes);
-  } catch {
-    return text;
-  }
+  return text.replace(MOJIBAKE_RUN, (seg) => {
+    const bytes = new Uint8Array(
+      Array.from(seg).map((c) => c.charCodeAt(0) & 0xff)
+    );
+    try {
+      return new TextDecoder(encoding, { fatal: false }).decode(bytes);
+    } catch {
+      return seg;
+    }
+  });
 }
 
 export function convertTraditionalSimplified(
   text: string,
   direction: "t2s" | "s2t"
 ): string {
+  // Strings containing kana are Japanese, not Chinese — a trad/simp dict
+  // would corrupt names like 坂本龍一 / 宇多田ヒカル.
+  if (containsKana(text)) return text;
   const dict = direction === "t2s" ? TRAD_TO_SIMP : SIMP_TO_TRAD;
   return Array.from(text)
     .map((ch) => dict[ch] ?? ch)
@@ -149,6 +166,33 @@ export function extractPrimaryArtist(artist: string): string {
   return artist
     .replace(/\s*(?:feat\.?|ft\.?|featuring|\/|;|、|&)\s*.*$/i, "")
     .trim();
+}
+
+export const DIAG_FLAG_LABELS: Record<string, string> = {
+  missing_cover: "缺失封面",
+  fragmented_album: "散碎专辑 / Feat.",
+  encoding_issue: "乱码 / 标点异常",
+  missing_track_or_year: "缺失曲目号 / 年份",
+  unorganized_path: "待归档目录",
+  md5_mismatch: "MD5 校验异常",
+};
+
+export function describeDiagFlags(flags: string[]): string {
+  return flags.map((f) => DIAG_FLAG_LABELS[f] ?? f).join("、");
+}
+
+// Compact labels for narrow status cells (full labels stay in tooltips)
+const DIAG_FLAG_LABELS_SHORT: Record<string, string> = {
+  missing_cover: "缺失封面",
+  fragmented_album: "散碎专辑",
+  encoding_issue: "乱码/标点",
+  missing_track_or_year: "缺号/缺年",
+  unorganized_path: "待归档",
+  md5_mismatch: "MD5异常",
+};
+
+export function describeDiagFlagsShort(flags: string[]): string {
+  return flags.map((f) => DIAG_FLAG_LABELS_SHORT[f] ?? f).join("、");
 }
 
 export function detectDiagnosticFlags(track: TrackRecord): string[] {
@@ -229,10 +273,6 @@ export function planUnifyFragmentedAlbums(tracks: TrackRecord[]): StagedChange[]
           patch.album = t.album.replace(/\s*\((?:CD|Disc)\s*\d+\)/i, "").trim();
           dirty = true;
         }
-      }
-      if (!t.artistSort.trim()) {
-        patch.artistSort = toPinyinSortKey(dominant);
-        dirty = true;
       }
       if (dirty) {
         changes.push({

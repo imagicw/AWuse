@@ -210,7 +210,7 @@ export const MiniTransportBar: React.FC<MiniTransportBarProps> = ({
           >
             {track
               ? `${track.artist || "未知歌手"} · ${track.album || "未知专辑"}`
-              : "双击或点击时长列试听核对音频"}
+              : "点击时长列的播放键或按 Space 试听核对音频"}
           </div>
         </div>
       </div>

@@ -13,9 +13,9 @@ AWuse 采用 **Tauri v2** 混合架构：底层利用 Rust 的内存安全与多
 flowchart TB
     subgraph UI["Frontend Workbench (React 19 + TypeScript + ADA Design System)"]
         direction LR
-        Nav["LeftSidebar<br/>媒体库 / 工作区 / 智能诊断"]
+        Nav["LeftSidebar<br/>媒体库浏览 / 目录管理 / 智能诊断"]
         Canvas["Center Multi-View<br/>画廊 / 歌手-专辑分栏 / 高密度表格"]
-        Insp["RightInspector<br/>多选属性 / 封面 / 歌词 / 音频流"]
+        Insp["TrackInspectorDialog<br/>多选属性 / 封面 / 歌词 / 音频流"]
         Trans["MiniTransportBar<br/>波形试听 / 实时 LRC / 流规格"]
     end
 
@@ -50,11 +50,9 @@ flowchart TB
 
 ---
 
-## 2. 双工作区模式与 SQLite FTS5 数据库 Schema
+## 2. 单一媒体库与 SQLite FTS5 数据库 Schema
 
-AWusicMeta 区分两种互补工作流：
-1. **持久媒体库模式 (Media Library Mode)**：挂载本地常驻曲库根目录，通过 `rayon` 并行扫描后建立 SQLite WAL + FTS5 索引库，支持千级/万级曲库秒级过滤、拼音 `A-Z` 快速跳转与智能体检诊断。
-2. **临时工作区模式 (Staging Workspace)**：拖拽外部下载目录（如刚解压的专辑包）进入临时沙盒，完成标签清洗、封面配对、散碎专辑归并后，通过目录重整引擎一键归档入库。
+AWusicMeta 采用单一媒体库工作流：挂载本地常驻曲库根目录，通过 `rayon` 并行扫描后建立 SQLite WAL + FTS5 索引库，支持千级/万级曲库秒级过滤、拼音 `A-Z` 快速跳转与智能体检诊断。外部下载目录或散装文件可直接拖入媒体库完成标签清洗、封面配对、散碎专辑归并；其中路径未归档的文件由「待归档目录」诊断项统一呈现，再通过目录重整引擎一键归档。
 
 ### 2.1 SQLite DDL Schema
 

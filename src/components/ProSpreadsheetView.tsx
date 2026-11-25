@@ -1,6 +1,10 @@
 import React, { useState, useRef } from "react";
 import { StagedChange, TagPatch, TrackRecord } from "../types/music";
-import { IconDisc, IconPlay, IconTrash } from "./Icons";
+import {
+  describeDiagFlags,
+  describeDiagFlagsShort,
+} from "../services/cjkAndBatchEngine";
+import { IconDisc, IconPlay, IconSliders, IconTrash } from "./Icons";
 import { VinylEmptyState } from "./VinylEmptyState";
 
 interface ProSpreadsheetViewProps {
@@ -13,6 +17,7 @@ interface ProSpreadsheetViewProps {
   onSelectAll: (ids: string[]) => void;
   onStageFieldEdit: (trackId: string, patch: TagPatch, reason: string) => void;
   onPlayTrack: (track: TrackRecord) => void;
+  onInspectTrack: (track: TrackRecord) => void;
   onRequestDeleteTracks: (trackIds: string[]) => void;
   onAddDirectory: () => void;
   onTriggerFileImport: () => void;
@@ -23,12 +28,10 @@ type EditableField =
   | "trackNumber"
   | "title"
   | "artist"
-  | "albumArtist"
   | "album"
-  | "year"
-  | "genre";
+  | "year";
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const totalSec = Math.round(ms / 1000);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
@@ -50,6 +53,7 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
   onSelectAll,
   onStageFieldEdit,
   onPlayTrack,
+  onInspectTrack,
   onRequestDeleteTracks,
   onAddDirectory,
   onTriggerFileImport,
@@ -229,7 +233,7 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
         </caption>
         <thead>
           <tr>
-            <th scope="col" style={{ width: "42px", textAlign: "center" }}>
+            <th scope="col" style={{ width: "44px", textAlign: "center" }}>
               <input
                 type="checkbox"
                 aria-label="全选当前列表音轨"
@@ -239,37 +243,29 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
                 }
               />
             </th>
-            <th scope="col" style={{ width: "48px" }}>
+            <th scope="col" style={{ width: "46px" }}>
               #
             </th>
-            <th scope="col" style={{ width: "24%" }}>
-              曲目标题
-            </th>
+            <th scope="col">曲目标题</th>
             <th scope="col" style={{ width: "15%" }}>
               歌手
             </th>
-            <th scope="col" style={{ width: "14%" }}>
-              专辑歌手
-            </th>
-            <th scope="col" style={{ width: "17%" }}>
+            <th scope="col" style={{ width: "18%" }}>
               专辑
             </th>
-            <th scope="col" style={{ width: "68px" }}>
+            <th scope="col" className="col-year" style={{ width: "62px" }}>
               年份
             </th>
-            <th scope="col" style={{ width: "96px" }}>
-              流派
-            </th>
-            <th scope="col" style={{ width: "118px" }}>
+            <th scope="col" className="col-spec" style={{ width: "116px" }}>
               音频规格
             </th>
-            <th scope="col" style={{ width: "74px", textAlign: "right" }}>
+            <th scope="col" style={{ width: "78px", textAlign: "right" }}>
               时长
             </th>
-            <th scope="col" style={{ width: "96px" }}>
-              状态 / MD5
+            <th scope="col" style={{ width: "92px" }}>
+              状态
             </th>
-            <th scope="col" style={{ width: "46px", textAlign: "center" }}>
+            <th scope="col" style={{ width: "92px", textAlign: "center" }}>
               <span className="visually-hidden">操作</span>
             </th>
           </tr>
@@ -282,6 +278,12 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
             const isPlaying = playingTrackId === t.id;
             const hasIssue = t.diagFlags.length > 0;
             const md5Bad = t.specs.md5Verified === "mismatch";
+            const issueLabel =
+              t.diagFlags.length === 1
+                ? describeDiagFlagsShort(t.diagFlags)
+                : t.diagFlags.length > 1
+                  ? `${describeDiagFlagsShort(t.diagFlags.slice(0, 1))} +${t.diagFlags.length - 1}`
+                  : "";
             const thumb = p?.coverDataUrl !== undefined ? p.coverDataUrl : t.coverDataUrl;
 
             return (
@@ -324,20 +326,11 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
 
                 {renderCell(t, "artist", t.artist, p?.artist !== undefined)}
 
-                {renderCell(
-                  t,
-                  "albumArtist",
-                  t.albumArtist,
-                  p?.albumArtist !== undefined
-                )}
-
                 {renderCell(t, "album", t.album, p?.album !== undefined)}
 
-                {renderCell(t, "year", t.year, p?.year !== undefined, "mono")}
+                {renderCell(t, "year", t.year, p?.year !== undefined, "mono col-year")}
 
-                {renderCell(t, "genre", t.genre, p?.genre !== undefined)}
-
-                <td className="mono">
+                <td className="mono col-spec">
                   <span className="spec-pill">
                     {t.specs.codec} {formatRate(t.specs.sampleRate, t.specs.bitDepth)}
                   </span>
@@ -378,9 +371,12 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
                       MD5异常
                     </span>
                   ) : hasIssue ? (
-                    <span style={{ color: "var(--staged)", fontSize: "11.5px" }}>
+                    <span
+                      style={{ color: "var(--staged)", fontSize: "11.5px" }}
+                      title={describeDiagFlags(t.diagFlags)}
+                    >
                       <span className="diag-dot warn" />
-                      待修复({t.diagFlags.length})
+                      {issueLabel}
                     </span>
                   ) : (
                     <span style={{ color: "var(--text-tertiary)", fontSize: "11.5px" }}>
@@ -391,18 +387,32 @@ export const ProSpreadsheetView: React.FC<ProSpreadsheetViewProps> = ({
                 </td>
 
                 <td style={{ textAlign: "center" }}>
-                  <button
-                    type="button"
-                    className="row-delete-btn"
-                    aria-label={`删除 ${t.title || t.fileName}`}
-                    title={`删除 ${t.title || t.fileName}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRequestDeleteTracks([t.id]);
-                    }}
-                  >
-                    <IconTrash size={14} />
-                  </button>
+                  <div className="row-action-group">
+                    <button
+                      type="button"
+                      className="row-delete-btn"
+                      aria-label={`打开 ${t.title || t.fileName} 属性编辑器`}
+                      title="属性编辑 (⌘I)"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onInspectTrack(t);
+                      }}
+                    >
+                      <IconSliders size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="row-delete-btn danger"
+                      aria-label={`删除 ${t.title || t.fileName}`}
+                      title={`删除 ${t.title || t.fileName}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRequestDeleteTracks([t.id]);
+                      }}
+                    >
+                      <IconTrash size={14} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             );
